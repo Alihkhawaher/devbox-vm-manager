@@ -14,6 +14,60 @@ Double-click **`vm-manager.cmd`**, or:
 It opens a console window (keep it open — that IS the server) and launches the GUI
 at <http://127.0.0.1:8777/>.
 
+## Screenshots
+
+### Dashboard — host, prerequisites, templates, sandboxes
+
+Host memory/disk meters; the prerequisite checklist (QEMU, 7-Zip, SSH key, guest
+image, golden base); **VM templates** with how many clones each one has; the
+sandbox table with live status, SSH port, resources, disk footprint and uptime;
+and the create form with a template picker.
+
+![Dashboard](docs/screenshots/01-dashboard.png)
+
+### Interactive terminal, in the browser
+
+A real shell in a tab — not a log pane. The system `ssh.exe` is bridged to
+xterm.js over SSE for output and POST for input, so closing the tab ends an SSH
+*client* and never touches the VM. The **Serial log** sub-tab shows the raw
+console, which still works while a VM is booting.
+
+![Terminal](docs/screenshots/06-terminal.png)
+
+### Docker management
+
+Install Docker into a guest, then see and drive its containers, images, networks
+and volumes. Containers can be started, stopped, restarted, removed, and their
+logs opened. Images can be pulled and removed, a container run directly, or a
+whole compose project deployed — the manager applies the `/etc/localtime`
+normalisation first, so re-deploying is safe.
+
+![Docker](docs/screenshots/04-docker.png)
+
+### Per-VM settings
+
+Memory, vCPUs, autostart and a note; extra host→guest port mappings; disk resize
+and filesystem growth; **freeze as template** turns a configured sandbox into a
+reusable base image; and delete.
+
+Memory, vCPUs and ports require the VM stopped — QEMU fixes them at launch.
+
+![Settings](docs/screenshots/03-settings.png)
+
+### Network view
+
+Every host→guest forward across all VMs in one table, with the listening state,
+the owning PID, and conflict detection if two VMs claim the same host port.
+
+![Network](docs/screenshots/05-network.png)
+
+### VM overview
+
+Per-VM identity and facts: status, the exact SSH command, MAC, resources, disk
+usage, which template it came from, its port mappings, and uptime.
+
+![Overview](docs/screenshots/02-overview.png)
+
 ## What the GUI does
 
 **Host** — live memory and disk meters.
