@@ -1,0 +1,22 @@
+# ---- local runtime state: never commit ----
+vms.json
+console.cmd
+source-check.txt
+
+# VM disks and logs (multi-GB, machine-specific)
+*.qcow2
+sandboxes/
+vm-bases/
+
+# generated launchers / logs
+*.log
+devbox-serial.log
+
+# throwaway browser profile used for UI checks
+.verifyprofile/
+
+# ---- dependencies / OS cruft ----
+node_modules/
+.DS_Store
+Thumbs.db
+desktop.ini

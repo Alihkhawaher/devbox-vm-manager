@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>devbox VM Manager</title>
+<link rel="stylesheet" href="/vendor/xterm.css">
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d212a; --line:#2a2f3a;
+    --fg:#e6e9ef; --muted:#98a2b3; --dim:#6b7480;
+    --accent:#4f8cff; --ok:#2ecc71; --warn:#f0b429; --err:#ff5c5c; --boot:#8b7cf6;
+    --radius:10px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Ubuntu,sans-serif}
+  .wrap{max-width:1240px;margin:0 auto;padding:22px 20px 70px}
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:20px}
+  h1{font-size:19px;margin:0;font-weight:650;letter-spacing:.2px}
+  .sub{color:var(--muted);font-size:12.5px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+        padding:16px 18px;margin-bottom:16px}
+  .card h2{font-size:13px;margin:0 0 12px;font-weight:600;color:var(--muted);
+           text-transform:uppercase;letter-spacing:.7px}
+  .row{display:flex;gap:14px;flex-wrap:wrap}
+  .col{flex:1;min-width:270px}
+  .stat{display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px}
+  .bar{height:8px;background:#0b0d11;border:1px solid var(--line);border-radius:6px;overflow:hidden;margin-bottom:14px}
+  .bar > i{display:block;height:100%;background:var(--accent);transition:width .4s}
+  .bar.warn > i{background:var(--warn)} .bar.err > i{background:var(--err)}
+
+  table{width:100%;border-collapse:collapse}
+  th{text-align:left;font-size:11.5px;color:var(--dim);text-transform:uppercase;
+     letter-spacing:.6px;font-weight:600;padding:0 10px 8px;border-bottom:1px solid var(--line)}
+  td{padding:10px;border-bottom:1px solid var(--line);vertical-align:middle;font-size:13px}
+  tr:last-child td{border-bottom:none}
+  tr.vm:hover{background:var(--panel2)}
+  tr.vm.sel{background:#1b2433}
+  .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px;color:var(--muted)}
+
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:1px}
+  .s-running .dot{background:var(--ok);box-shadow:0 0 7px var(--ok)}
+  .s-booting .dot{background:var(--boot);box-shadow:0 0 7px var(--boot)}
+  .s-stopped .dot{background:var(--dim)}
+  .s-error .dot{background:var(--err)}
+  .pill{display:inline-flex;align-items:center;font-size:12px;padding:2px 9px;border-radius:20px;
+        border:1px solid var(--line);background:#12151b}
+  .s-running .pill{color:var(--ok);border-color:#1d4a33}
+  .s-booting .pill{color:var(--boot);border-color:#3a3161}
+  .s-stopped .pill{color:var(--muted)}
+  .s-error .pill{color:var(--err);border-color:#5a2626}
+
+  button{font:inherit;font-size:12.5px;padding:6px 12px;border-radius:7px;cursor:pointer;
+         background:var(--panel2);color:var(--fg);border:1px solid var(--line);transition:.15s}
+  button:hover:not(:disabled){background:#252a35;border-color:#3a4150}
+  button:disabled{opacity:.38;cursor:not-allowed}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:550}
+  button.primary:hover:not(:disabled){background:#3f7bec}
+  button.danger{color:#ffb4b4}
+  button.danger:hover:not(:disabled){background:#3a1f1f;border-color:#5a2626}
+  button.sm{padding:4px 9px;font-size:12px}
+  .btns{display:flex;gap:6px;flex-wrap:wrap}
+
+  input,select,textarea{font:inherit;font-size:13px;padding:7px 10px;border-radius:7px;
+        background:#0b0d11;color:var(--fg);border:1px solid var(--line);width:100%}
+  input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
+  textarea{font-family:ui-monospace,Consolas,monospace;font-size:12px;min-height:130px;resize:vertical}
+  label{display:block;font-size:11.5px;color:var(--dim);text-transform:uppercase;
+        letter-spacing:.5px;margin-bottom:5px;font-weight:600}
+  .grid{display:grid;gap:10px;align-items:end}
+  .g-create{grid-template-columns:2fr 1fr 1fr 1.4fr auto}
+  .g-set{grid-template-columns:repeat(4,1fr)}
+  .g-run{grid-template-columns:1.3fr 1fr 1.3fr auto}
+  @media(max-width:860px){.g-create,.g-set,.g-run{grid-template-columns:1fr 1fr}}
+
+  .prereq{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)}
+  .prereq:last-child{border-bottom:none}
+  .prereq .txt{flex:1;min-width:0}
+  .prereq .detail{font-size:12px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tick{width:18px;text-align:center}
+  .tick.y{color:var(--ok)} .tick.n{color:var(--err)}
+
+  pre{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:12px;
+      font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;line-height:1.5;
+      max-height:340px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;color:#c8d0dc}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+         background:var(--panel2);border:1px solid var(--line);border-radius:9px;
+         padding:11px 16px;font-size:13px;box-shadow:0 8px 28px rgba(0,0,0,.5);display:none;z-index:50;max-width:80vw}
+  .toast.err{border-color:#5a2626;color:#ffb4b4}
+  .toast.ok{border-color:#1d4a33;color:#a8e6c4}
+  .empty{color:var(--dim);font-size:13px;padding:14px 2px}
+  .hint{font-size:12px;color:var(--dim);margin-top:9px}
+  .spin{display:inline-block;width:11px;height:11px;border:2px solid var(--line);
+        border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-1px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  .tabs{display:flex;align-items:center;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+  .tab{background:transparent;border:1px solid transparent;color:var(--muted);font-weight:600;
+       font-size:12.5px;padding:5px 11px}
+  .tab.active{background:var(--panel2);border-color:var(--line);color:var(--fg)}
+  #termwrap{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:8px;
+            height:400px;overflow:hidden}
+  #term{height:100%}
+  .kv{display:grid;grid-template-columns:170px 1fr;gap:6px 14px;font-size:13px}
+  .kv .k{color:var(--dim)}
+  .tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:5px;border:1px solid var(--line);color:var(--muted);margin-left:6px}
+  .conflict{color:var(--err)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1>devbox VM Manager</h1>
+      <div class="sub" id="sub">connecting...</div>
+    </div>
+    <div style="flex:1"></div>
+    <button id="refresh">Refresh</button>
+  </header>
+
+  <div class="card">
+    <h2>Host</h2>
+    <div class="row">
+      <div class="col">
+        <div class="stat"><span>Memory</span><b id="memtxt">-</b></div>
+        <div class="bar" id="membar"><i style="width:0%"></i></div>
+      </div>
+      <div class="col">
+        <div class="stat"><span>Disk (C:)</span><b id="disktxt">-</b></div>
+        <div class="bar" id="diskbar"><i style="width:0%"></i></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Prerequisites</h2>
+    <div id="prereqs"><div class="empty">checking...</div></div>
+  </div>
+
+  <div class="card" id="taskcard" style="display:none">
+    <h2 id="tasktitle">Operation</h2>
+    <pre id="tasklog"></pre>
+  </div>
+
+  <div class="card">
+    <h2>VM templates (base images)</h2>
+    <div id="bases"></div>
+    <div class="hint">Every sandbox is an instant copy-on-write clone of a template. Freeze a configured sandbox
+      (Settings tab) to turn it into a reusable template — e.g. one with Docker already installed.</div>
+  </div>
+
+  <div class="card">
+    <div class="tabs" style="margin-bottom:12px">
+      <h2 style="margin:0">Sandboxes</h2>
+      <div style="flex:1"></div>
+      <label style="display:flex;align-items:center;gap:7px;margin:0;text-transform:none;letter-spacing:0;font-size:12px;color:var(--muted);cursor:pointer">
+        <input type="checkbox" id="showconsole" style="width:auto;margin:0"> show boot console window
+      </label>
+    </div>
+    <div id="vms"></div>
+  </div>
+
+  <div class="card">
+    <h2>Create a sandbox</h2>
+    <div class="grid g-create">
+      <div><label for="n">Name</label><input id="n" placeholder="lab3" autocomplete="off"></div>
+      <div><label for="m">Memory (MB)</label><input id="m" type="number" value="1024" min="256" step="128"></div>
+      <div><label for="c">vCPUs</label><input id="c" type="number" value="2" min="1" max="8"></div>
+      <div><label for="bsel">Template</label><select id="bsel"></select></div>
+      <div><button class="primary" id="create">Create</button></div>
+    </div>
+  </div>
+
+  <!-- ============ VM DETAIL ============ -->
+  <div class="card" id="detail" style="display:none">
+    <div class="tabs">
+      <button class="tab active" data-vtab="overview">Overview</button>
+      <button class="tab" data-vtab="settings">Settings</button>
+      <button class="tab" data-vtab="docker">Docker</button>
+      <button class="tab" data-vtab="network">Network</button>
+      <button class="tab" data-vtab="terminal">Terminal</button>
+      <div style="flex:1"></div>
+      <span class="mono" id="dtitle"></span>
+      <button class="sm" id="dclose">Close</button>
+    </div>
+
+    <div id="v-overview">
+      <div class="kv" id="ovk"></div>
+      <div class="btns" style="margin-top:14px">
+        <button class="sm" id="ovStart">Start</button>
+        <button class="sm" id="ovStop">Stop</button>
+        <button class="sm" id="ovConsole">Open console</button>
+        <button class="sm" id="ovSsh">Copy SSH command</button>
+      </div>
+    </div>
+
+    <div id="v-settings" style="display:none">
+      <div class="grid g-set">
+        <div><label for="sMem">Memory (MB)</label><input id="sMem" type="number" min="256" step="128"></div>
+        <div><label for="sCpu">vCPUs</label><input id="sCpu" type="number" min="1" max="8"></div>
+        <div><label for="sAuto">Autostart</label>
+          <select id="sAuto"><option value="off">off</option><option value="on">on</option></select></div>
+        <div><label for="sNote">Note</label><input id="sNote" placeholder="what is this VM for?"></div>
+      </div>
+      <div style="margin-top:10px"><label for="sPorts">Extra port mappings (host:guest, comma separated)</label>
+        <input id="sPorts" placeholder="2283:2283, 8080:80"></div>
+      <div class="btns" style="margin-top:14px">
+        <button class="primary sm" id="setSave">Save settings</button>
+        <button class="sm" id="setGrow">Grow filesystem</button>
+        <button class="sm danger" id="vDelete">Delete sandbox</button>
+      </div>
+      <div class="grid g-set" style="margin-top:16px">
+        <div><label for="sSize">Disk size (GB)</label><input id="sSize" type="number" min="2" max="512" placeholder="24"></div>
+        <div><button class="sm" id="setResize">Resize disk</button></div>
+        <div><label for="fzName">Freeze as template</label><input id="fzName" placeholder="docker-ready"></div>
+        <div><button class="sm" id="setFreeze">Freeze</button></div>
+      </div>
+      <div class="hint">Memory, vCPUs and ports need the VM <b>stopped</b>; they apply when it starts.
+        Disk resize needs it stopped, then start it and press <b>Grow filesystem</b>.</div>
+    </div>
+
+    <div id="v-docker" style="display:none"><div id="dockerbody"></div></div>
+    <div id="v-network"><div id="netbody"></div></div>
+
+    <div id="v-terminal" style="display:none">
+      <div class="tabs" style="margin-bottom:10px">
+        <button class="tab active" data-ttab="term">Interactive</button>
+        <button class="tab" data-ttab="log">Serial log</button>
+        <div style="flex:1"></div>
+        <button class="sm" id="termDisc" style="display:none">Disconnect</button>
+      </div>
+      <div id="twrap"><div id="term"></div></div>
+      <pre id="log" style="display:none">(serial log)</pre>
+    </div>
+  </div>
+
+</div>
+<div class="toast" id="toast"></div>
+
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/xterm-addon-fit.js"></script>
+<script>
+const $ = (s) => document.querySelector(s);
+let CURRENT = null, LOGTIMER = null, DOCKTIMER = null, BASES = [];
+
+function toast(msg, kind){
+  const t = $('#toast'); t.textContent = msg; t.className = 'toast ' + (kind || '');
+  t.style.display = 'block'; clearTimeout(toast._t);
+  toast._t = setTimeout(() => { t.style.display = 'none'; }, 4600);
+}
+function fmtBytes(n){
+  if (n === null || n === undefined) return '-';
+  if (n === 0) return '0 B';
+  const u = ['B','KB','MB','GB','TB']; let i = 0;
+  while (n >= 1024 && i < u.length-1){ n /= 1024; i++; }
+  return (i === 0 ? n : n.toFixed(1)) + ' ' + u[i];
+}
+const pct = (a,b) => b ? Math.min(100, Math.round(a/b*100)) : 0;
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function uptime(iso){
+  if (!iso) return '-';
+  const s = Math.floor((Date.now() - new Date(iso).getTime())/1000);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+  return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+}
+function api(p, o){ return fetch(p, o).then(r => r.json()).then(j => { if (j && j.ok === false) throw new Error(j.error || 'request failed'); return j; }); }
+function post(p, b){ return api(p, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(b || {}) }); }
+
+/* ---------------- task progress ---------------- */
+let TASKT = null;
+async function runTask(p, body, label, btn){
+  if (btn){ btn.disabled = true; btn.innerHTML = '<span class="spin"></span> ' + label; }
+  try {
+    await post(p, body);
+    toast(label + ' started', 'ok');
+    pollTask();
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally {
+    if (btn){ btn.disabled = false; btn.textContent = label; }
+  }
+}
+function pollTask(){
+  clearInterval(TASKT);
+  $('#taskcard').style.display = 'block';
+  TASKT = setInterval(async () => {
+    try {
+      const t = (await api('/api/task')).task;
+      const NAMES = { 'install-qemu':'Installing QEMU', 'build-base':'Building base image',
+        'docker-install':'Installing Docker', 'docker-pull':'Pulling image', 'docker-run':'Running container',
+        'compose':'Deploying compose project', 'resize':'Resizing disk', 'growfs':'Growing filesystem',
+        'freeze':'Freezing template', 'settings':'Saving settings' };
+      const label = NAMES[t.name] || t.name || 'Operation';
+      $('#tasktitle').innerHTML = label + ' <span class="mono">[' + t.status + ']</span>';
+      const el = $('#tasklog'), atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
+      el.textContent = (t.log || []).join('\n') || '(starting...)';
+      if (atEnd) el.scrollTop = el.scrollHeight;
+      if (t.status !== 'running'){
+        clearInterval(TASKT); TASKT = null;
+        if (t.status === 'done') toast(label + ' finished', 'ok');
+        else toast(label + ' failed: ' + (t.error || 'unknown'), 'err');
+        refresh(); if (CURRENT) { loadDocker(CURRENT); }
+      }
+    } catch (e) {}
+  }, 1400);
+}
+
+/* ---------------- rendering ---------------- */
+function renderHost(h){
+  const mu = pct(h.memUsed, h.memTotal);
+  $('#memtxt').textContent = fmtBytes(h.memUsed) + ' used / ' + fmtBytes(h.memTotal) + '  (' + (100-mu) + '% free)';
+  $('#membar').className = 'bar' + (mu > 90 ? ' err' : mu > 75 ? ' warn' : '');
+  $('#membar').firstElementChild.style.width = mu + '%';
+  const du = pct(h.diskUsed, h.diskTotal);
+  $('#disktxt').textContent = fmtBytes(h.diskFree) + ' free of ' + fmtBytes(h.diskTotal);
+  $('#diskbar').className = 'bar' + (du > 92 ? ' err' : du > 80 ? ' warn' : '');
+  $('#diskbar').firstElementChild.style.width = du + '%';
+}
+function renderPrereqs(p){
+  const order = ['qemu','sevenzip','sshkey','alpine','base'];
+  const labels = { qemu:'QEMU emulator', sevenzip:'7-Zip (unpacker)', sshkey:'SSH key',
+                   alpine:'Alpine guest image', base:'Golden base image' };
+  const actions = { qemu:{cmd:'/api/install/qemu',text:'Install'}, base:{cmd:'/api/install/base',text:'Download & build'} };
+  let h = '';
+  for (const k of order){
+    const it = p[k] || { ok:false, detail:'unknown' };
+    const a = it.ok ? null : actions[k];
+    h += '<div class="prereq"><div class="tick ' + (it.ok?'y':'n') + '">' + (it.ok?'&#10003;':'&#10007;') + '</div>'
+      + '<div class="txt"><div>' + labels[k] + '</div><div class="detail">' + esc(it.detail) + '</div></div>'
+      + (a ? '<button class="primary sm" data-cmd="' + a.cmd + '" data-l="' + a.text + '">' + a.text + '</button>' : '')
+      + '</div>';
+  }
+  $('#prereqs').innerHTML = h;
+  $('#prereqs').querySelectorAll('button[data-cmd]').forEach(b =>
+    b.onclick = () => runTask(b.dataset.cmd, {}, b.dataset.l, b));
+}
+function renderBases(bases){
+  BASES = bases;
+  if (!bases.length){ $('#bases').innerHTML = '<div class="empty">No templates yet.</div>'; $('#bsel').innerHTML = ''; return; }
+  let h = '<table><thead><tr><th>Template</th><th>Size</th><th>Clones</th><th></th></tr></thead><tbody>';
+  for (const b of bases){
+    h += '<tr class="vm"><td><b>' + esc(b.name) + '</b>' + (b.isDefault ? '<span class="tag">default</span>' : '') + '</td>'
+      + '<td class="mono">' + fmtBytes(b.size) + '</td><td class="mono">' + b.usedBy + '</td>'
+      + '<td><button class="sm primary" data-bact="new" data-b="' + esc(b.name) + '">New VM from this</button></td></tr>';
+  }
+  h += '</tbody></table>';
+  $('#bases').innerHTML = h;
+  $('#bases').querySelectorAll('button[data-bact]').forEach(b => b.onclick = () => makeFromBase(b.dataset.b));
+  $('#bsel').innerHTML = bases.map(b => '<option value="' + esc(b.name) + '"' + (b.isDefault?' selected':'') + '>' + esc(b.name) + '</option>').join('');
+}
+function makeFromBase(baseName){
+  const name = prompt('Name for the new sandbox (cloned from "' + baseName + '"):');
+  if (!name) return;
+  const mem = prompt('Memory in MB:', '1024'); if (mem === null) return;
+  const cpus = prompt('vCPUs:', '2'); if (cpus === null) return;
+  runTask('/api/vm/create', { name, mem, cpus, base: baseName }, 'Create VM');
+}
+function renderVms(vms){
+  if (!vms.length){ $('#vms').innerHTML = '<div class="empty">No sandboxes yet.</div>'; return; }
+  let h = '<table><thead><tr><th>Name</th><th>Status</th><th>SSH</th><th>Resources</th><th>Disk</th><th>Uptime</th><th>Actions</th></tr></thead><tbody>';
+  for (const v of vms){
+    const running = v.status === 'running';
+    h += '<tr class="vm' + (CURRENT === v.name ? ' sel' : '') + '">'
+      + '<td><b>' + esc(v.name) + '</b>' + (v.autostart ? '<span class="tag">auto</span>' : '')
+      + (v.pid ? '<div class="mono">pid ' + v.pid + '</div>' : '') + '</td>'
+      + '<td class="s-' + v.status + '"><span class="pill"><span class="dot"></span>' + v.status + '</span></td>'
+      + '<td class="mono">' + v.port + '</td>'
+      + '<td class="mono">' + v.mem + ' MB / ' + v.cpus + ' vCPU</td>'
+      + '<td class="mono">' + fmtBytes(v.diskBytes) + '</td>'
+      + '<td class="mono">' + (v.startedAt ? uptime(v.startedAt) : '-') + '</td>'
+      + '<td><div class="btns">'
+      + (v.status === 'stopped'
+          ? '<button class="primary sm" data-act="start" data-n="' + esc(v.name) + '">Start</button>'
+          : '<button class="sm" data-act="stop" data-n="' + esc(v.name) + '">Stop</button>')
+      + '<button class="sm" data-act="select" data-n="' + esc(v.name) + '">Manage</button>'
+      + '</div></td></tr>';
+  }
+  h += '</tbody></table>';
+  $('#vms').innerHTML = h;
+  $('#vms').querySelectorAll('button[data-act]').forEach(b => b.onclick = () => {
+    const n = b.dataset.n;
+    if (b.dataset.act === 'select') return selectVm(n);
+    if (b.dataset.act === 'start') return runTask('/api/vm/start', { name:n, showConsole: !!($('#showconsole')||{}).checked }, 'Start ' + n, b);
+    if (b.dataset.act === 'stop')  return runTask('/api/vm/stop', { name:n }, 'Stop ' + n, b);
+  });
+}
+function renderNetwork(rows){
+  let h = '<table><thead><tr><th>Host port</th><th>VM</th><th>Kind</th><th>Guest</th><th>State</th><th>PID</th></tr></thead><tbody>';
+  for (const r of rows){
+    h += '<tr class="vm"><td class="mono' + (r.conflict ? ' conflict' : '') + '">' + r.host + (r.conflict ? '  CONFLICT' : '') + '</td>'
+      + '<td>' + esc(r.vm) + '</td><td class="mono">' + r.kind + '</td><td class="mono">' + r.guest + '</td>'
+      + '<td class="mono">' + (r.listening ? 'listening' : 'closed') + '</td><td class="mono">' + (r.pid || '-') + '</td></tr>';
+  }
+  h += '</tbody></table>';
+  $('#netbody').innerHTML = rows.length ? h
+    : '<div class="empty">No port mappings yet. Add them in a VM\'s Settings tab.</div>';
+}
+
+/* ---------------- VM detail ---------------- */
+function showVTab(which){
+  document.querySelectorAll('#detail [data-vtab]').forEach(b => b.classList.toggle('active', b.dataset.vtab === which));
+  for (const t of ['overview','settings','docker','network','terminal'])
+    $('#v-' + t).style.display = (t === which) ? '' : 'none';
+  if (which === 'terminal') setTimeout(() => { try { fitAddon && fitAddon.fit(); } catch(e){} }, 60);
+  if (which === 'docker' && CURRENT) loadDocker(CURRENT);
+  if (which === 'network') loadNetwork();
+}
+function selectVm(name){
+  CURRENT = name;
+  $('#detail').style.display = '';
+  const v = (window.__vms || []).find(x => x.name === name);
+  $('#dtitle').textContent = name + (v ? '  ·  ssh ' + v.port : '');
+  if (v){
+    $('#sMem').value = v.mem; $('#sCpu').value = v.cpus;
+    $('#sAuto').value = v.autostart ? 'on' : 'off';
+    $('#sNote').value = v.note || '';
+    $('#sPorts').value = (v.ports || []).map(p => p.host + ':' + p.guest).join(', ');
+    $('#ovk').innerHTML =
+        '<div class="k">Status</div><div>' + v.status + '</div>'
+      + '<div class="k">SSH</div><div class="mono">ssh -i ' + esc(window.__sshKey || 'id_dev') + ' -p ' + v.port + ' root@127.0.0.1</div>'
+      + '<div class="k">MAC</div><div class="mono">' + v.mac + '</div>'
+      + '<div class="k">Memory / vCPU</div><div class="mono">' + v.mem + ' MB / ' + v.cpus + '</div>'
+      + '<div class="k">Disk (host)</div><div class="mono">' + fmtBytes(v.diskBytes) + '</div>'
+      + '<div class="k">Template</div><div class="mono">' + esc((v.base||'').split(/[\\/]/).pop() || '-') + '</div>'
+      + '<div class="k">Ports</div><div class="mono">' + ((v.ports||[]).map(p => p.host + '→' + p.guest).join(', ') || '-') + '</div>'
+      + '<div class="k">Uptime</div><div class="mono">' + (v.startedAt ? uptime(v.startedAt) : '-') + '</div>';
+  }
+  showVTab('overview');
+  $('#detail').scrollIntoView({ behavior:'smooth', block:'start' });
+}
+function loadNetwork(){
+  api('/api/network').then(j => renderNetwork(j.rows)).catch(() => {});
+}
+
+/* ---------------- docker panel ---------------- */
+async function loadDocker(name){
+  try {
+    const d = await api('/api/vm/docker?name=' + encodeURIComponent(name));
+    renderDocker(name, d);
+  } catch (e) { $('#dockerbody').innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; }
+}
+function renderDocker(name, d){
+  const n = esc(name);
+  let h = '';
+  if (!d.installed){
+    h += '<div class="empty">Docker is not installed in this VM'
+      + (d.note ? ' (' + d.note + ')' : '') + '.</div>';
+    if (d.running) h += '<button class="primary sm" id="dInstall">Install Docker</button>';
+    else h += '<div class="hint">Start the VM to install Docker.</div>';
+    $('#dockerbody').innerHTML = h;
+    const b = $('#dInstall'); if (b) b.onclick = (ev) => runTask('/api/vm/docker/install', { name }, 'Install Docker', ev.target);
+    return;
+  }
+  h += '<div class="hint" style="margin:0 0 12px">Docker server <b>' + esc(d.version) + '</b> · '
+     + d.containers.length + ' containers · ' + d.images.length + ' images</div>';
+
+  h += '<h2>Containers</h2>';
+  if (!d.containers.length) h += '<div class="empty">None.</div>';
+  else {
+    h += '<table><thead><tr><th>Name</th><th>Image</th><th>State</th><th>Ports</th><th></th></tr></thead><tbody>';
+    for (const c of d.containers){
+      h += '<tr class="vm"><td><b>' + esc(c.name) + '</b></td><td class="mono">' + esc(c.image) + '</td>'
+        + '<td class="mono">' + esc(c.status || c.state) + '</td><td class="mono">' + esc(c.ports || '-') + '</td>'
+        + '<td><div class="btns">'
+        + (c.running
+            ? '<button class="sm" data-dact="stop" data-id="' + esc(c.name) + '" data-n="' + n + '">Stop</button>'
+              + '<button class="sm" data-dact="restart" data-id="' + esc(c.name) + '" data-n="' + n + '">Restart</button>'
+            : '<button class="sm primary" data-dact="start" data-id="' + esc(c.name) + '" data-n="' + n + '">Start</button>')
+        + '<button class="sm" data-dlog="' + esc(c.name) + '" data-n="' + n + '">Logs</button>'
+        + '<button class="sm danger" data-dact="rm" data-id="' + esc(c.name) + '" data-n="' + n + '">Remove</button>'
+        + '</div></td></tr>';
+    }
+    h += '</tbody></table>';
+  }
+
+  h += '<h2 style="margin-top:20px">Run a container</h2>'
+     + '<div class="grid g-run">'
+     + '<div><label for="rImg">Image</label><input id="rImg" placeholder="nginx:alpine"></div>'
+     + '<div><label for="rPorts">Ports</label><input id="rPorts" placeholder="80:80"></div>'
+     + '<div><label for="rName">Name</label><input id="rName" placeholder="web"></div>'
+     + '<button class="primary" id="rGo">Run</button></div>'
+     + '<div class="hint">Ports are <b>inside the guest</b>. To reach the container from Windows, also add a '
+     + 'host→guest mapping in Settings (e.g. host 8080 → guest 80), then start the VM.</div>';
+
+  h += '<h2 style="margin-top:20px">Images</h2>'
+     + '<div class="grid g-run">'
+     + '<div><label for="pImg">Pull image</label><input id="pImg" placeholder="redis:7-alpine"></div>'
+     + '<div></div><div></div><button class="sm" id="pGo">Pull</button></div>';
+  if (d.images.length){
+    h += '<table style="margin-top:10px"><thead><tr><th>Repository</th><th>Tag</th><th>Size</th><th></th></tr></thead><tbody>';
+    for (const i of d.images){
+      h += '<tr class="vm"><td class="mono">' + esc(i.repo) + '</td><td class="mono">' + esc(i.tag) + '</td>'
+        + '<td class="mono">' + esc(i.size) + '</td>'
+        + '<td><button class="sm danger" data-rmi="' + esc(i.repo + ':' + i.tag) + '" data-n="' + n + '">Remove</button></td></tr>';
+    }
+    h += '</tbody></table>';
+  }
+
+  h += '<h2 style="margin-top:20px">Deploy a compose project</h2>'
+     + '<div class="grid" style="grid-template-columns:1fr 3fr auto">'
+     + '<div><label for="cName">Project</label><input id="cName" placeholder="app"></div>'
+     + '<div><label for="cYaml">docker-compose.yml</label><input id="cYamlFile" type="file" accept=".yml,.yaml" style="padding:4px"></div>'
+     + '<button class="sm" id="cLoad">Load file</button></div>'
+     + '<div style="margin-top:10px"><textarea id="cText" placeholder="services:&#10;  web:&#10;    image: nginx:alpine&#10;    ports: [&quot;80:80&quot;]"></textarea></div>'
+     + '<div class="btns" style="margin-top:10px"><button class="primary sm" id="cGo">Deploy</button></div>'
+     + '<div class="hint">The manager applies the <code>/etc/localtime</code> fix before deploying, so re-deploying is safe.</div>';
+
+  h += '<h2 style="margin-top:20px">Networks &amp; volumes</h2><div class="mono">'
+     + d.networks.map(x => x.name + ' (' + x.driver + ')').join('<br>')
+     + (d.volumes.length ? '<br>' + d.volumes.map(v => v.name).join('<br>') : '')
+     + '</div>';
+
+  $('#dockerbody').innerHTML = h;
+
+  const I = $('#dInstall'); if (I) I.onclick = (e) => runTask('/api/vm/docker/install', { name }, 'Install Docker', e.target);
+  $('#dockerbody').querySelectorAll('button[data-dact]').forEach(b => b.onclick = () =>
+    runTask('/api/vm/docker/action', { name: b.dataset.n, id: b.dataset.id, action: b.dataset.dact }, 'Docker ' + b.dataset.dact, b));
+  $('#dockerbody').querySelectorAll('button[data-rmi]').forEach(b => b.onclick = () =>
+    runTask('/api/vm/docker/rmi', { name: b.dataset.n, image: b.dataset.rmi }, 'Remove image', b));
+  $('#dockerbody').querySelectorAll('button[data-dlog]').forEach(b => b.onclick = async () => {
+    try { const j = await api('/api/vm/docker/logs?name=' + encodeURIComponent(b.dataset.n) + '&container=' + encodeURIComponent(b.dataset.dlog));
+      showText('Logs: ' + b.dataset.dlog, j.text); } catch (e) { toast(e.message, 'err'); }
+  });
+  const g = $('#rGo'); if (g) g.onclick = (e) => runTask('/api/vm/docker/run',
+    { name, image: $('#rImg').value.trim(), ports: $('#rPorts').value.trim(), containerName: $('#rName').value.trim() }, 'Run container', e.target);
+  const p = $('#pGo'); if (p) p.onclick = (e) => runTask('/api/vm/docker/pull', { name, image: $('#pImg').value.trim() }, 'Pull image', e.target);
+  const cl = $('#cLoad'); if (cl) cl.onclick = () => {
+    const f = $('#cYamlFile').files[0]; if (!f) return toast('choose a .yml file first', 'err');
+    const r = new FileReader(); r.onload = () => { $('#cText').value = r.result; }; r.readAsText(f);
+  };
+  const cg = $('#cGo'); if (cg) cg.onclick = (e) => runTask('/api/vm/compose',
+    { name, project: $('#cName').value.trim(), yaml: $('#cText').value }, 'Deploy compose', e.target);
+}
+function showText(title, text){
+  const w = window.open('', '_blank', 'width=900,height=600');
+  if (!w) return toast('popup blocked', 'err');
+  w.document.write('<title>' + esc(title) + '</title><body style="margin:0;background:#0b0d11;color:#c8d0dc;'
+    + 'font:12px ui-monospace,Consolas,monospace"><pre style="padding:14px;white-space:pre-wrap">' + esc(text) + '</pre></body>');
+}
+
+/* ---------------- terminal ---------------- */
+let term = null, fitAddon = null, es = null, sessId = null;
+function showTTab(which){
+  document.querySelectorAll('#v-terminal [data-ttab]').forEach(b => b.classList.toggle('active', b.dataset.ttab === which));
+  $('#twrap').style.display = which === 'term' ? '' : 'none';
+  $('#log').style.display = which === 'log' ? '' : 'none';
+  if (which === 'term') setTimeout(() => { try { fitAddon && fitAddon.fit(); } catch(e){} }, 50);
+}
+function ensureTerm(){
+  if (term || typeof Terminal === 'undefined') return;
+  term = new Terminal({ cursorBlink:true, fontSize:13, scrollback:5000,
+    fontFamily:'ui-monospace, SFMono-Regular, Consolas, monospace',
+    theme:{ background:'#0b0d11', foreground:'#c8d0dc', cursor:'#4f8cff', selectionBackground:'#2a3f66' } });
+  fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open($('#term'));
+  try { fitAddon.fit(); } catch(e){}
+  term.onData(d => { if (sessId) fetch('/api/vm/console/input', { method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id: sessId, data: d }) }).catch(()=>{}); });
+  window.addEventListener('resize', () => { try { fitAddon.fit(); } catch(e){} });
+}
+async function openConsole(name){
+  ensureTerm();
+  if (!term) return toast('terminal library failed to load', 'err');
+  showVTab('terminal'); showTTab('term');
+  try {
+    const r = await post('/api/vm/console', { name });
+    if (es) { es.close(); es = null; }
+    sessId = r.session; term.reset();
+    term.write('\x1b[90m[connecting to ' + name + ' ...]\x1b[0m\r\n');
+    es = new EventSource('/api/vm/console/stream?id=' + encodeURIComponent(sessId));
+    es.onmessage = (ev) => {
+      let j; try { j = JSON.parse(ev.data); } catch(e){ return; }
+      if (j.t) term.write(j.t);
+      if (j.exit !== undefined){ term.write('\r\n\x1b[33m[session ended]\x1b[0m\r\n'); es.close(); es = null; sessId = null; $('#termDisc').style.display='none'; }
+    };
+    $('#termDisc').style.display = '';
+    setTimeout(() => { try { fitAddon.fit(); } catch(e){} term.focus(); }, 80);
+  } catch (e) { toast(e.message, 'err'); }
+}
+function loadSerial(name){
+  showTTab('log');
+  const load = () => api('/api/log?name=' + encodeURIComponent(name) + '&tail=400')
+    .then(j => { $('#log').textContent = j.text || '(empty)'; }).catch(e => { $('#log').textContent = 'error: ' + e.message; });
+  clearInterval(LOGTIMER); load(); LOGTIMER = setInterval(load, 3000);
+}
+
+/* ---------------- wiring ---------------- */
+$('#refresh').onclick = () => refresh();
+$('#dclose').onclick = () => { CURRENT = null; clearInterval(DOCKTIMER); $('#detail').style.display = 'none'; refresh(); };
+document.querySelectorAll('#detail [data-vtab]').forEach(b => b.onclick = () => showVTab(b.dataset.vtab));
+document.querySelectorAll('#v-terminal [data-ttab]').forEach(b => b.onclick = () => {
+  if (b.dataset.ttab === 'log' && CURRENT) return loadSerial(CURRENT);
+  showTTab('term');
+});
+$('#termDisc').onclick = () => {
+  if (sessId) post('/api/vm/console/close', { id: sessId }).catch(()=>{});
+  if (es) { es.close(); es = null; }
+  sessId = null; $('#termDisc').style.display = 'none';
+  if (term) term.write('\r\n\x1b[90m[disconnected]\x1b[0m\r\n');
+};
+$('#ovStart').onclick = () => CURRENT && runTask('/api/vm/start', { name: CURRENT }, 'Start ' + CURRENT);
+$('#ovStop').onclick = () => CURRENT && runTask('/api/vm/stop', { name: CURRENT }, 'Stop ' + CURRENT);
+$('#ovConsole').onclick = () => CURRENT && openConsole(CURRENT);
+$('#ovSsh').onclick = async () => {
+  const v = (window.__vms||[]).find(x => x.name === CURRENT); if (!v) return;
+  const cmd = 'ssh -i ' + (window.__sshKey || 'id_dev') + ' -p ' + v.port + ' root@127.0.0.1';
+  try { await navigator.clipboard.writeText(cmd); toast('Copied: ' + cmd, 'ok'); } catch(e){ prompt('SSH command:', cmd); }
+};
+$('#setSave').onclick = (e) => CURRENT && runTask('/api/vm/settings', { name: CURRENT,
+  mem: +$('#sMem').value, cpus: +$('#sCpu').value, ports: $('#sPorts').value,
+  autostart: $('#sAuto').value === 'on', note: $('#sNote').value }, 'Save settings', e.target);
+$('#setResize').onclick = (e) => CURRENT && runTask('/api/vm/resize', { name: CURRENT, size: +$('#sSize').value }, 'Resize disk', e.target);
+$('#setGrow').onclick = (e) => CURRENT && runTask('/api/vm/growfs', { name: CURRENT }, 'Grow filesystem', e.target);
+$('#setFreeze').onclick = (e) => CURRENT && runTask('/api/vm/freeze', { name: CURRENT, as: $('#fzName').value.trim() }, 'Freeze template', e.target);
+$('#vDelete').onclick = async () => {
+  if (!CURRENT) return;
+  if (!confirm('Delete sandbox "' + CURRENT + '"?\n\nIts disk image is permanently removed. Templates are untouched.')) return;
+  await runTask('/api/vm/delete', { name: CURRENT }, 'Delete');
+  CURRENT = null; $('#detail').style.display = 'none'; refresh();
+};
+$('#create').onclick = (e) => {
+  const name = $('#n').value.trim();
+  if (!name) return toast('Enter a name', 'err');
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) return toast('Name: letters, digits, dot, dash, underscore only', 'err');
+  runTask('/api/vm/create', { name, mem:+$('#m').value, cpus:+$('#c').value, base: $('#bsel').value }, 'Create VM', e.target);
+  $('#n').value = '';
+};
+
+async function refresh(){
+  try {
+    const s = await api('/api/state');
+    window.__vms = s.vms;
+    window.__sshKey = s.sshKey || '';
+    renderHost(s.host); renderPrereqs(s.prereqs); renderBases(s.bases || []); renderVms(s.vms);
+    if (!CURRENT) loadNetwork();
+    $('#sub').textContent = s.host.hostname + ' · ' + s.host.cpus + ' vCPU · '
+      + s.vms.filter(v => v.status !== 'stopped').length + ' of ' + s.vms.length + ' sandboxes active';
+    if (s.task && s.task.status === 'running' && !TASKT) pollTask();
+  } catch (e) {
+    $('#sub').textContent = 'cannot reach the manager service — is the console window still open?';
+  }
+}
+const _want = new URLSearchParams(location.search).get('console');
+refresh();
+setInterval(() => { if (!document.hidden) refresh(); }, 2500);
+const _q = new URLSearchParams(location.search);
+const _vm = _q.get('vm'), _tab = _q.get('tab');
+if (_vm) {
+  let t = 0;
+  const iv = setInterval(() => {
+    t++;
+    const v = (window.__vms || []).find(x => x.name === _vm);
+    if (v){ clearInterval(iv); selectVm(_vm); if (_tab) showVTab(_tab); }
+    else if (t > 40) clearInterval(iv);
+  }, 900);
+}
+if (_want) {
+  let t = 0;
+  const iv = setInterval(() => {
+    t++;
+    const v = (window.__vms || []).find(x => x.name === _want);
+    if (v && v.status !== 'stopped'){ clearInterval(iv); selectVm(_want); openConsole(_want); }
+    else if (t > 45){ clearInterval(iv); toast('Sandbox "' + _want + '" is not running', 'err'); }
+  }, 1000);
+}
+</script>
+</body>
+</html>
