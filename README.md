@@ -237,6 +237,43 @@ Other honest limits: an image wanting a database, a secret, or a specific
 `--cap-add` still needs those in the **Env** box or a compose file, and the
 automatic VM restart costs ~90 seconds.
 
+## One-shot: image reference to running sandbox
+
+The card at the top of the page does the whole thing from one image reference —
+no pre-existing VM required:
+
+```
+type an image, press "Create sandbox and deploy"
+
+  1/4  create a sandbox by cloning a Docker-capable template
+  2/4  boot it and wait for SSH
+  3/4  check Docker is present (install it if the template lacks it)
+  4/4  pull the image, derive its ports/volumes, map them, start it
+       -> reports a clickable URL
+```
+
+**Ports you name up front are written to the VM before its first boot**, so QEMU
+applies those forwards at launch and nothing restarts. Ports that can only be
+learned by inspecting the image cost one extra restart (~90s), because QEMU fixes
+port forwards at launch time and cannot add one to a running VM.
+
+### Be careful with multi-container apps
+
+An image reference gives you **one container**. That is fine for single-container
+apps, and it is not enough for apps that need a database.
+
+Worked example — `leesonaa/immich` (a mirror of `ghcr.io/imagegenius/immich`):
+
+- it declares `EXPOSE 8080` and `VOLUME /config /photos /libraries`, so the
+  manager will discover port 8080 and mount those volumes automatically
+- but Immich additionally requires **PostgreSQL and Redis**, which that image
+  does not contain — its README has you supply them externally (Redis optionally
+  through a docker mod)
+
+So the deploy will succeed and serve a UI that cannot finish starting. For
+anything with more than one container, use the **compose** path in the Docker
+tab, which is designed for exactly that.
+
 ## Running services (Docker, web apps)
 
 Containers need kernel namespaces and cgroups, **not** hardware virtualization, so

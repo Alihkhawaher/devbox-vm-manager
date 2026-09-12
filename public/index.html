@@ -122,6 +122,9 @@
   .modal input[readonly]{cursor:text;background:#0b0d11}
   button.danger{background:var(--err);border-color:var(--err);color:#fff;font-weight:550}
   button.danger:hover:not(:disabled){background:#c9382f}
+  label.chk{display:flex;align-items:center;gap:6px;margin:0;text-transform:none;
+    letter-spacing:0;font-size:12px;color:var(--muted);cursor:pointer}
+  label.chk input{width:auto;margin:0}
 </style>
 </head>
 <body>
@@ -176,6 +179,40 @@
       </label>
     </div>
     <div id="vms"></div>
+  </div>
+
+  <div class="card">
+    <h2>Run an app from a Docker image</h2>
+    <div class="hint" style="margin:0 0 12px">
+      Paste an image reference and press the button. The manager creates a
+      Docker-capable sandbox, boots it, pulls the image, works out its ports and
+      volumes, starts it and gives you the URL — no existing VM needed.
+      <b>Ports you name below are applied at boot</b>, so nothing has to restart.
+    </div>
+    <div style="margin-bottom:12px">
+      <label for="qPreset">Start from a preset — fills in everything below</label>
+      <select id="qPreset"></select>
+    </div>
+    <div class="grid g-create">
+      <div><label for="qImg">Image</label><input id="qImg" placeholder="leesonaa/immich" autocomplete="off"></div>
+      <div><label for="qName">Sandbox name (optional)</label><input id="qName" placeholder="(from image)" autocomplete="off"></div>
+    </div>
+    <div class="grid g-set" style="margin-top:10px">
+      <div><label for="qMem">Memory (MB)</label><input id="qMem" type="number" value="2048" min="256" step="128"></div>
+      <div><label for="qCpu">vCPUs</label><input id="qCpu" type="number" value="2" min="1" max="8"></div>
+      <div><label for="qEnv">Env (comma separated)</label><input id="qEnv" placeholder="TZ=UTC"></div>
+    </div>
+    <div style="margin-top:10px"><label for="qPorts">Ports (host:guest) — leave blank to derive them from the image</label>
+      <input id="qPorts" placeholder="8123:8123"></div>
+    <div style="margin-top:10px"><label for="qVols">Volumes (host:container) — for images that declare none</label>
+      <input id="qVols" placeholder="/opt/app/config:/config"></div>
+    <div class="btns" style="margin-top:12px;align-items:center">
+      <button class="primary" id="qGo">Create sandbox and deploy</button>
+      <label class="chk"><input type="checkbox" id="qPriv"> privileged</label>
+      <label class="chk"><input type="checkbox" id="qHostNet"> host network</label>
+      <label class="chk"><input type="checkbox" id="qConsole"> show boot console window</label>
+    </div>
+    <div id="qInfo" class="hint"></div>
   </div>
 
   <div class="card">
@@ -361,42 +398,54 @@ function post(p, b){ return api(p, { method:'POST', headers:{'Content-Type':'app
 
 /* ---------------- task progress ---------------- */
 let TASKT = null;
+const TASK_NAMES = { 'install-qemu':'Installing QEMU', 'build-base':'Building base image',
+  'sandbox from image':'Building sandbox from image', 'deploy':'Deploying image',
+  'docker-install':'Installing Docker', 'docker-pull':'Pulling image', 'docker-run':'Running container',
+  'compose':'Deploying compose project', 'resize':'Resizing disk', 'growfs':'Growing filesystem',
+  'freeze':'Freezing template', 'settings':'Saving settings', 'create':'Creating sandbox',
+  'start':'Starting sandbox', 'stop':'Stopping sandbox' };
+
 async function runTask(p, body, label, btn){
   if (btn){ btn.disabled = true; btn.innerHTML = '<span class="spin"></span> ' + label; }
+  // Start watching BEFORE the POST. The server only replies once the whole
+  // operation is finished, so polling afterwards would show a dead spinner for
+  // minutes on a slow job (a pull plus a VM boot) instead of live progress.
+  watchTask(true);
   try {
     await post(p, body);
-    toast(label + ' started', 'ok');
-    pollTask();
+    refresh();
   } catch (e) {
     toast(e.message, 'err');
   } finally {
     if (btn){ btn.disabled = false; btn.textContent = label; }
   }
 }
-function pollTask(){
+// waitForNew: ignore the task that is already finished, wait for a fresh one.
+function watchTask(waitForNew){
   clearInterval(TASKT);
   $('#taskcard').style.display = 'block';
+  let started = !waitForNew;
   TASKT = setInterval(async () => {
-    try {
-      const t = (await api('/api/task')).task;
-      const NAMES = { 'install-qemu':'Installing QEMU', 'build-base':'Building base image',
-        'docker-install':'Installing Docker', 'docker-pull':'Pulling image', 'docker-run':'Running container',
-        'compose':'Deploying compose project', 'resize':'Resizing disk', 'growfs':'Growing filesystem',
-        'freeze':'Freezing template', 'settings':'Saving settings' };
-      const label = NAMES[t.name] || t.name || 'Operation';
-      $('#tasktitle').innerHTML = label + ' <span class="mono">[' + t.status + ']</span>';
-      const el = $('#tasklog'), atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
-      el.textContent = (t.log || []).join('\n') || '(starting...)';
-      if (atEnd) el.scrollTop = el.scrollHeight;
-      if (t.status !== 'running'){
-        clearInterval(TASKT); TASKT = null;
-        if (t.status === 'done') toast(label + ' finished', 'ok');
-        else toast(label + ' failed: ' + (t.error || 'unknown'), 'err');
-        refresh(); if (CURRENT) { loadDocker(CURRENT); }
-      }
-    } catch (e) {}
-  }, 1400);
+    let t;
+    try { t = (await api('/api/task')).task; } catch (e) { return; }
+    if (!started){
+      if (t.status !== 'running') return;   // that is the previous op - keep waiting
+      started = true;
+    }
+    const label = TASK_NAMES[t.name] || t.name || 'Operation';
+    $('#tasktitle').innerHTML = label + ' <span class="mono">[' + t.status + ']</span>';
+    const el = $('#tasklog'), atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
+    el.textContent = (t.log || []).join('\n') || '(starting...)';
+    if (atEnd) el.scrollTop = el.scrollHeight;
+    if (t.status !== 'running'){
+      clearInterval(TASKT); TASKT = null;
+      if (t.status === 'done') toast(label + ' finished', 'ok');
+      else toast(label + ' failed: ' + (t.error || 'unknown'), 'err');
+      refresh(); if (CURRENT) { loadDocker(CURRENT); }
+    }
+  }, 1200);
 }
+function pollTask(){ return watchTask(false); }
 
 /* ---------------- rendering ---------------- */
 function renderHost(h){
@@ -806,6 +855,42 @@ $('#create').onclick = (e) => {
   if (!/^[A-Za-z0-9._-]+$/.test(name)) return toast('Name: letters, digits, dot, dash, underscore only', 'err');
   runTask('/api/vm/create', { name, mem:+$('#m').value, cpus:+$('#c').value, base: $('#bsel').value }, 'Create VM', e.target);
   $('#n').value = '';
+};
+
+/* ---------------- one-shot: image reference -> running sandbox ---------------- */
+const qPreset = $('#qPreset');
+if (qPreset){
+  qPreset.innerHTML = '<option value="">— pick an app, or type an image below —</option>'
+    + PRESETS.map(p => '<option value="' + esc(p.key) + '">' + esc(p.label) + '</option>').join('');
+  qPreset.onchange = () => {
+    const p = PRESETS.find(x => x.key === qPreset.value);
+    if (!p) { $('#qInfo').textContent = ''; return; }
+    $('#qImg').value = p.image || '';
+    $('#qName').value = '';                 // let it derive from the image
+    $('#qPorts').value = p.ports || '';
+    $('#qVols').value = p.volumes || '';
+    $('#qEnv').value = p.env || '';
+    $('#qPriv').checked = !!p.privileged;
+    $('#qHostNet').checked = !!p.hostNetwork;
+    $('#qInfo').textContent = p.note || '';
+    toast('Filled in ' + p.label + ' — press Create sandbox and deploy', 'ok');
+  };
+}
+$('#qGo').onclick = (e) => {
+  const image = $('#qImg').value.trim();
+  if (!image) return toast('enter an image reference', 'err');
+  runTask('/api/vm/quickdeploy', {
+    image: image,
+    name: $('#qName').value.trim(),
+    mem: +$('#qMem').value,
+    cpus: +$('#qCpu').value,
+    ports: $('#qPorts').value.trim(),
+    volumes: $('#qVols').value.trim(),
+    env: $('#qEnv').value.trim(),
+    privileged: $('#qPriv').checked,
+    hostNetwork: $('#qHostNet').checked,
+    showConsole: $('#qConsole').checked,
+  }, 'Sandbox from ' + image, e.target);
 };
 
 async function refresh(){

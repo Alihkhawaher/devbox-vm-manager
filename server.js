@@ -185,8 +185,12 @@ function allocPort() {
 // tasks (one long-running operation at a time, with a live log)
 // --------------------------------------------------------------------------
 let task = { name: null, status: 'idle', log: [], startedAt: null, endedAt: null, error: null };
+// While a composite operation (one-shot deploy) runs its sub-operations, keep a
+// single continuous task log instead of letting each sub-op reset it.
+let KEEP_TASK = false;
 
 function beginTask(name) {
+  if (KEEP_TASK) return;
   task = { name: name, status: 'running', log: [], startedAt: Date.now(), endedAt: null, error: null };
 }
 function tlog(msg) {
@@ -195,6 +199,7 @@ function tlog(msg) {
   if (task.log.length > 800) task.log.splice(0, task.log.length - 800);
 }
 function endTask(err) {
+  if (KEEP_TASK) { if (err) tlog('ERROR: ' + String((err && err.message) || err)); return; }
   task.status = err ? 'error' : 'done';
   task.endedAt = Date.now();
   if (err) { task.error = String((err && err.message) || err); tlog('ERROR: ' + task.error); }
@@ -1205,6 +1210,120 @@ async function opDeploy(name, o) {
 }
 
 // --------------------------------------------------------------------------
+// one-shot: image reference -> running sandbox
+//
+// Creates a Docker-capable sandbox, boots it, then deploys the image into it.
+// Reuses opCreate/opStart/opDeploy instead of duplicating them, so this path
+// gets the same port derivation, /etc/localtime fix and volume handling.
+//
+// Ports the caller names up front are written to the VM record BEFORE the first
+// boot, so QEMU applies those forwards at launch and no restart is needed.
+// Ports that can only be learned by inspecting the image still cost one restart.
+// --------------------------------------------------------------------------
+async function opQuickDeploy(o) {
+  const steps = [];
+  const phase = (msg) => { if (msg) steps.push(msg); beginTask('sandbox from image'); for (const s of steps) tlog(s); };
+  phase(null);
+  KEEP_TASK = true;
+  try {
+
+  const image = String(o.image || '').trim();
+  if (!image) throw new Error('an image reference is required');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._\/:@-]*$/.test(image)) throw new Error('that does not look like an image reference: ' + image);
+
+  let name = safeName(o.name || '');
+  if (!name) {
+    const tail = image.split('/').pop().split(':')[0].replace(/[^A-Za-z0-9._-]/g, '-');
+    name = safeName(tail.replace(/-+/g, '-').replace(/^-+|-+$/g, ''));
+  }
+  if (!name) throw new Error('could not derive a sandbox name from "' + image + '" - give one explicitly');
+  let uniq = name, n = 1;
+  while (state.vms[uniq] || exists(diskPath(uniq))) uniq = name + '-' + (++n);
+  name = uniq;
+
+  const bases = listBases();
+  const wanted = (o.template && bases.some((b) => b.name === o.template)) ? o.template
+    : bases.some((b) => b.name === 'docker-ready') ? 'docker-ready' : null;
+  const tplFile = wanted ? findBase(wanted) : CFG.base;
+  if (!exists(tplFile)) throw new Error('no usable template found - build one first');
+
+  const mem = Math.min(Math.max(parseInt(o.mem, 10) || CFG.defaultMem, 256), CFG.maxMem);
+  const cpus = Math.min(Math.max(parseInt(o.cpus, 10) || CFG.defaultCpus, 1), 8);
+
+  phase('Image    : ' + image);
+  phase('Sandbox  : ' + name + '   (' + mem + ' MB, ' + cpus + ' vCPU)');
+  phase('Template : ' + path.basename(tplFile) + (wanted === 'docker-ready' ? '   (Docker preinstalled)' : ''));
+
+  // 1. create the sandbox
+  phase('Step 1/4: creating the sandbox...');
+  await opCreate(name, mem, cpus, null, wanted);
+  const vm = state.vms[name];
+
+  // ports the user named go in BEFORE the first boot so the forwards exist
+  // from launch and we never have to restart to add them
+  const explicit = [];
+  for (const part of String(o.ports || '').split(',').map((s) => s.trim()).filter(Boolean)) {
+    const m = part.match(/^(\d{1,5})(?::(\d{1,5}))?$/);
+    if (!m) throw new Error('bad port spec "' + part + '" - use host:guest, e.g. 8123:8123');
+    explicit.push({ host: parseInt(m[1], 10), guest: parseInt(m[2] || m[1], 10) });
+  }
+  const taken = new Set();
+  for (const [n2, v2] of Object.entries(state.vms)) {
+    if (n2 === name) continue;
+    taken.add(v2.port);
+    for (const q of (v2.ports || [])) taken.add(q.host);
+  }
+  const pre = [];
+  for (const w of explicit) {
+    let hp = w.host;
+    while (taken.has(hp) || hp === vm.port) hp++;
+    taken.add(hp);
+    pre.push({ host: hp, guest: w.guest });
+  }
+  if (pre.length) { vm.ports = pre; saveState(); }
+  phase(pre.length
+    ? 'Pre-set port forwards: ' + pre.map((q) => q.host + '->' + q.guest).join(', ') + '   (applied at boot, no restart needed)'
+    : 'No ports named up front - they will be derived from the image after it is pulled.');
+
+  // 2. boot it
+  phase('Step 2/4: booting - a fresh clone takes ~85s...');
+  await opStart(name, !!o.showConsole);
+  let up = false;
+  for (let i = 0; i < 40; i++) {
+    if (await probeSsh(vm.port, 2500)) { up = true; break; }
+    await new Promise((r) => setTimeout(r, 4000));
+  }
+  if (!up) throw new Error('the sandbox never finished booting - open its log, then deploy the image from its Docker tab');
+  phase('Sandbox is up: ssh -i <key> -p ' + vm.port + ' root@127.0.0.1');
+
+  // 3. is Docker in this template?
+  phase('Step 3/4: checking for Docker in the guest...');
+  const dv = await sshExec(vm.port, 'docker version --format "{{.Server.Version}}" 2>/dev/null || echo MISSING', 60000);
+  if (/MISSING/.test(dv.out)) {
+    phase('Not present in this template - installing it (several minutes)...');
+    await opDockerInstall(name);
+    phase('Docker installed.');
+  } else {
+    phase('Docker server ' + dv.out.trim() + ' already present.');
+  }
+
+  // 4. pull, inspect, map any remaining ports, run
+  phase('Step 4/4: pulling the image and starting it...');
+  const res = await opDeploy(name, {
+    image: image,
+    containerName: o.containerName || name,
+    env: o.env,
+    volumes: o.volumes,
+    ports: o.ports,
+    privileged: !!o.privileged,
+    hostNetwork: !!o.hostNetwork,
+  });
+  phase('Done. Sandbox "' + name + '"' + (res.urls && res.urls.length ? ' -> ' + res.urls.join('  ') : ''));
+  return Object.assign({ sandbox: name }, res);
+  } finally { KEEP_TASK = false; }
+}
+
+// --------------------------------------------------------------------------
 // HTTP API
 // --------------------------------------------------------------------------
 function send(res, code, body, type) {
@@ -1340,6 +1459,11 @@ const server = http.createServer(async (req, res) => {
         if (!guard(res)) return;
         try { const r = await opDeploy(body.name, body); return send(res, 200, { ok: true, result: r }); }
         catch (e) { endTask(e); return send(res, 400, { ok: false, error: String(e.message || e) }); }
+      }
+      if (p === '/api/vm/quickdeploy') {
+        if (!guard(res)) return;
+        try { const r = await opQuickDeploy(body); return send(res, 200, { ok: true, result: r }); }
+        catch (e) { endTask(e); return send(res, 500, { ok: false, error: e.message }); }
       }
       if (p === '/api/vm/docker/install') {
         if (!guard(res)) return;
