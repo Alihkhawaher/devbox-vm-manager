@@ -14,6 +14,24 @@ Double-click **`vm-manager.cmd`**, or:
 It opens a console window (keep it open — that IS the server) and launches the GUI
 at <http://127.0.0.1:8777/>.
 
+## Interaction conventions
+
+**No native browser dialogs.** `prompt()`, `confirm()` and `alert()` are not
+used anywhere in the GUI:
+
+- they block the whole page and the event loop while open
+- they cannot be styled, so they look nothing like the app
+- `prompt()` is disabled outright in sandboxed or cross-origin iframes, and
+  silently returns `null` there — the action just appears to do nothing
+- `confirm()` returns a `boolean` with no way to distinguish "user said no"
+  from "browser suppressed it"
+
+Instead there is one `modal()` helper that returns a promise, resolving the
+field values on submit or `null` if cancelled. Escape and clicking the backdrop
+both cancel. `window.open()` is avoided for the same class of reason — popup
+blockers kill it without a visible error — so logs and command output render in
+a dialog instead.
+
 ## Screenshots
 
 ### Dashboard — host, prerequisites, templates, sandboxes
@@ -43,6 +61,19 @@ whole compose project deployed — the manager applies the `/etc/localtime`
 normalisation first, so re-deploying is safe.
 
 ![Docker](docs/screenshots/04-docker.png)
+
+### Docker deploy box
+
+Pick a preset or paste an image; **Inspect only** shows what it wants before you
+commit to anything. Ports and volumes override what the image fails to declare.
+
+![Deploy an image](docs/screenshots/08-deploy-preset.png)
+
+### New sandbox dialog
+
+In-app modal, not a native `prompt()` — see *Interaction conventions* above.
+
+![New sandbox dialog](docs/screenshots/07-new-vm-dialog.png)
 
 ### Per-VM settings
 

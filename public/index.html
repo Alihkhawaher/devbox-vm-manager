@@ -106,6 +106,22 @@
   .kv .k{color:var(--dim)}
   .tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:5px;border:1px solid var(--line);color:var(--muted);margin-left:6px}
   .conflict{color:var(--err)}
+
+  /* ---- in-app modal (replaces native prompt/confirm/alert) ---- */
+  .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;
+    align-items:center;justify-content:center;z-index:200;padding:20px}
+  .modal{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    width:100%;max-width:600px;max-height:86vh;overflow:auto;
+    box-shadow:0 24px 70px rgba(0,0,0,.65)}
+  .modal .mhead{padding:16px 18px 0}
+  .modal h3{margin:0;font-size:15px;font-weight:650}
+  .modal .mbody{padding:12px 18px 4px}
+  .modal .mhint{font-size:12.5px;color:var(--dim);margin-bottom:12px;line-height:1.5}
+  .modal .mfoot{padding:6px 18px 16px;display:flex;gap:8px;justify-content:flex-end}
+  .modal pre{max-height:52vh;margin:0}
+  .modal input[readonly]{cursor:text;background:#0b0d11}
+  button.danger{background:var(--err);border-color:var(--err);color:#fff;font-weight:550}
+  button.danger:hover:not(:disabled){background:#c9382f}
 </style>
 </head>
 <body>
@@ -238,6 +254,7 @@
 
 </div>
 <div class="toast" id="toast"></div>
+<div class="modal-backdrop" id="modal" style="display:none"><div class="modal" id="modal-box"></div></div>
 
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/xterm-addon-fit.js"></script>
@@ -257,6 +274,79 @@ function fmtBytes(n){
   while (n >= 1024 && i < u.length-1){ n /= 1024; i++; }
   return (i === 0 ? n : n.toFixed(1)) + ' ' + u[i];
 }
+
+/* ---------------- in-app modal ----------------
+ * Native prompt()/confirm() block the whole page, cannot be styled, and prompt()
+ * is disabled outright in sandboxed frames. This replaces them with a normal
+ * dialog. modal() resolves the field values on submit, or null if cancelled.
+ */
+function modal(opts){
+  return new Promise((resolve) => {
+    const back = $('#modal'), box = $('#modal-box');
+    box.innerHTML =
+        '<div class="mhead"><h3>' + esc(opts.title || '') + '</h3></div>'
+      + '<form id="mform" autocomplete="off"><div class="mbody">'
+      + (opts.hint ? '<div class="mhint">' + opts.hint + '</div>' : '')
+      + (opts.body || '')
+      + '</div><div class="mfoot">'
+      + (opts.cancelLabel === null ? '' : '<button type="button" class="sm" id="mCancel">' + esc(opts.cancelLabel || 'Cancel') + '</button>')
+      + (opts.submitLabel === null ? '' : '<button type="submit" class="sm ' + (opts.danger ? 'danger' : 'primary') + '">' + esc(opts.submitLabel || 'OK') + '</button>')
+      + '</div></form>';
+    back.style.display = 'flex';
+    const close = (v) => {
+      back.style.display = 'none'; box.innerHTML = '';
+      document.removeEventListener('keydown', onKey);
+      resolve(v);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') close(null); };
+    document.addEventListener('keydown', onKey);
+    back.onclick = (e) => { if (e.target === back) close(null); };
+    const c = $('#mCancel'); if (c) c.onclick = () => close(null);
+    $('#mform').onsubmit = (e) => {
+      e.preventDefault();
+      const data = {};
+      box.querySelectorAll('input,select,textarea').forEach((i, n) => { data[i.id || ('f' + n)] = i.value; });
+      if (opts.onSubmit && opts.onSubmit(data, box) === false) return;
+      close(data);
+    };
+    const first = box.querySelector('input,select,textarea');
+    if (first) setTimeout(() => first.focus(), 40);
+  });
+}
+const mfield = (id, label, value, ph, type) =>
+  '<div style="margin-bottom:10px"><label for="' + id + '">' + esc(label) + '</label>'
+  + '<input id="' + id + '" type="' + (type || 'text') + '" value="' + esc(value == null ? '' : value) + '"'
+  + ' placeholder="' + esc(ph || '') + '"></div>';
+
+// Confirm a destructive action. Resolves true only if the user submits.
+async function confirmDialog(title, hint, submitLabel){
+  const r = await modal({ title: title, hint: hint, body: '', submitLabel: submitLabel || 'Delete', danger: true });
+  return !!r;
+}
+function infoDialog(title, html, hint){
+  return modal({ title: title, hint: hint || '', body: html, submitLabel: 'Close', cancelLabel: null });
+}
+
+/* Starting points for the deploy box. Home Assistant is the case that proves why
+ * the override fields exist: its image declares neither EXPOSE nor VOLUME, so
+ * inspection finds nothing and the port and volume must be supplied by hand. */
+const PRESETS = [
+  { key:'homeassistant', label:'Home Assistant', image:'ghcr.io/home-assistant/home-assistant:stable',
+    container:'homeassistant', ports:'8123:8123', volumes:'/opt/homeassistant/config:/config',
+    env:'TZ=UTC', privileged:true, hostNetwork:true,
+    note:'This image declares no ports and no volumes, so both fields above are doing the work. First start takes ~4 minutes.' },
+  { key:'nginx', label:'nginx (web server)', image:'nginx:alpine',
+    container:'nginx', ports:'8080:80',
+    note:'The image declares 80/tcp, so the port box is only choosing the Windows-side number.' },
+  { key:'gitea', label:'Gitea (self-hosted Git)', image:'gitea/gitea:latest',
+    container:'gitea', ports:'3000:3000', volumes:'/opt/gitea:/data', env:'TZ=UTC' },
+  { key:'uptime-kuma', label:'Uptime Kuma (service monitor)', image:'louislam/uptime-kuma:1',
+    container:'uptime-kuma', ports:'3001:3001', volumes:'/opt/uptime-kuma:/app/data' },
+  { key:'redis', label:'Redis', image:'redis:7-alpine', container:'redis', ports:'6379:6379' },
+  { key:'postgres', label:'PostgreSQL', image:'postgres:16-alpine', container:'postgres',
+    ports:'5432:5432', volumes:'/opt/postgres:/var/lib/postgresql/data',
+    env:'POSTGRES_PASSWORD=postgres' },
+];
 const pct = (a,b) => b ? Math.min(100, Math.round(a/b*100)) : 0;
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function uptime(iso){
@@ -351,12 +441,21 @@ function renderBases(bases){
   $('#bases').querySelectorAll('button[data-bact]').forEach(b => b.onclick = () => makeFromBase(b.dataset.b));
   $('#bsel').innerHTML = bases.map(b => '<option value="' + esc(b.name) + '"' + (b.isDefault?' selected':'') + '>' + esc(b.name) + '</option>').join('');
 }
-function makeFromBase(baseName){
-  const name = prompt('Name for the new sandbox (cloned from "' + baseName + '"):');
-  if (!name) return;
-  const mem = prompt('Memory in MB:', '1024'); if (mem === null) return;
-  const cpus = prompt('vCPUs:', '2'); if (cpus === null) return;
-  runTask('/api/vm/create', { name, mem, cpus, base: baseName }, 'Create VM');
+async function makeFromBase(baseName){
+  const d = await modal({
+    title: 'New sandbox from "' + baseName + '"',
+    hint: 'An instant copy-on-write clone of this template — usually well under a '
+        + 'second and a few hundred KB, because the base image is shared.',
+    body: mfield('fName', 'Name', '', 'lab3')
+        + mfield('fMem', 'Memory (MB)', '1024', '', 'number')
+        + mfield('fCpus', 'vCPUs', '2', '', 'number'),
+    submitLabel: 'Create',
+  });
+  if (!d) return;
+  const name = (d.fName || '').trim();
+  if (!name) return toast('Enter a name', 'err');
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) return toast('Name: letters, digits, dot, dash, underscore only', 'err');
+  runTask('/api/vm/create', { name, mem: +d.fMem, cpus: +d.fCpus, base: baseName }, 'Create VM');
 }
 function renderVms(vms){
   if (!vms.length){ $('#vms').innerHTML = '<div class="empty">No sandboxes yet.</div>'; return; }
@@ -512,6 +611,10 @@ function renderDocker(name, d){
      + '<div class="hint" style="margin:0 0 10px">Paste any image reference — the manager inspects it for '
      + 'exposed ports and volumes, maps the ports through to Windows, creates the volume directories, '
      + 'restarts the VM if new forwards are needed, and starts it. You should not need the image\'s docs.</div>'
+     + '<div style="margin-bottom:12px"><label for="dPreset">Start from a preset — fills in everything below</label>'
+     + '<select id="dPreset"><option value="">— pick an app, or type an image below —</option>'
+     + PRESETS.map(p => '<option value="' + esc(p.key) + '">' + esc(p.label) + '</option>').join('')
+     + '</select></div>'
      + '<div class="grid g-run">'
      + '<div><label for="dImg">Image</label><input id="dImg" placeholder="ghcr.io/home-assistant/home-assistant:stable"></div>'
      + '<div><label for="dCName">Container name</label><input id="dCName" placeholder="(from image)"></div>'
@@ -566,6 +669,20 @@ function renderDocker(name, d){
     privileged: $('#dPriv').checked,
     hostNetwork: $('#dHostNet').checked,
   });
+  const preset = $('#dPreset');
+  if (preset) preset.onchange = () => {
+    const p = PRESETS.find(x => x.key === preset.value);
+    if (!p) return;
+    $('#dImg').value = p.image || '';
+    $('#dCName').value = p.container || '';
+    $('#dPorts').value = p.ports || '';
+    $('#dVols').value = p.volumes || '';
+    $('#dEnv').value = p.env || '';
+    $('#dPriv').checked = !!p.privileged;
+    $('#dHostNet').checked = !!p.hostNetwork;
+    $('#dInfo').innerHTML = p.note ? esc(p.note) : '';
+    toast('Filled in ' + p.label + ' — now press Deploy', 'ok');
+  };
   const insBtn = $('#dInspect');
   if (insBtn) insBtn.onclick = async (e) => {
     const img = $('#dImg').value.trim();
@@ -590,10 +707,8 @@ function renderDocker(name, d){
   };
 }
 function showText(title, text){
-  const w = window.open('', '_blank', 'width=900,height=600');
-  if (!w) return toast('popup blocked', 'err');
-  w.document.write('<title>' + esc(title) + '</title><body style="margin:0;background:#0b0d11;color:#c8d0dc;'
-    + 'font:12px ui-monospace,Consolas,monospace"><pre style="padding:14px;white-space:pre-wrap">' + esc(text) + '</pre></body>');
+  // In-app dialog rather than window.open, which popup blockers silently kill.
+  return infoDialog(title, '<pre style="white-space:pre-wrap">' + esc(text) + '</pre>');
 }
 
 /* ---------------- terminal ---------------- */
@@ -663,7 +778,13 @@ $('#ovConsole').onclick = () => CURRENT && openConsole(CURRENT);
 $('#ovSsh').onclick = async () => {
   const v = (window.__vms||[]).find(x => x.name === CURRENT); if (!v) return;
   const cmd = 'ssh -i ' + (window.__sshKey || 'id_dev') + ' -p ' + v.port + ' root@127.0.0.1';
-  try { await navigator.clipboard.writeText(cmd); toast('Copied: ' + cmd, 'ok'); } catch(e){ prompt('SSH command:', cmd); }
+  try { await navigator.clipboard.writeText(cmd); toast('Copied: ' + cmd, 'ok'); }
+  catch(e){
+    infoDialog('SSH command',
+      '<input id="fCmd" readonly value="' + esc(cmd) + '" onclick="this.select()">',
+      'Clipboard access was blocked by the browser, so copy it from the field '
+      + 'below (click it to select all).');
+  }
 };
 $('#setSave').onclick = (e) => CURRENT && runTask('/api/vm/settings', { name: CURRENT,
   mem: +$('#sMem').value, cpus: +$('#sCpu').value, ports: $('#sPorts').value,
@@ -673,7 +794,9 @@ $('#setGrow').onclick = (e) => CURRENT && runTask('/api/vm/growfs', { name: CURR
 $('#setFreeze').onclick = (e) => CURRENT && runTask('/api/vm/freeze', { name: CURRENT, as: $('#fzName').value.trim() }, 'Freeze template', e.target);
 $('#vDelete').onclick = async () => {
   if (!CURRENT) return;
-  if (!confirm('Delete sandbox "' + CURRENT + '"?\n\nIts disk image is permanently removed. Templates are untouched.')) return;
+  if (!await confirmDialog('Delete sandbox "' + CURRENT + '"?',
+      'Its disk image is permanently removed and this cannot be undone. '
+      + 'Templates and other sandboxes are untouched.')) return;
   await runTask('/api/vm/delete', { name: CURRENT }, 'Delete');
   CURRENT = null; $('#detail').style.display = 'none'; refresh();
 };
