@@ -125,6 +125,10 @@
   label.chk{display:flex;align-items:center;gap:6px;margin:0;text-transform:none;
     letter-spacing:0;font-size:12px;color:var(--muted);cursor:pointer}
   label.chk input{width:auto;margin:0}
+  details summary{cursor:pointer;font-size:12px;color:var(--muted);text-transform:uppercase;
+    letter-spacing:.04em;padding:4px 0;user-select:none}
+  details summary:hover{color:var(--fg)}
+  details[open] summary{margin-bottom:2px}
 </style>
 </head>
 <body>
@@ -184,34 +188,38 @@
   <div class="card">
     <h2>Run an app from a Docker image</h2>
     <div class="hint" style="margin:0 0 12px">
-      Paste an image reference and press the button. The manager creates a
+      Type an image reference and press the button. The manager creates a
       Docker-capable sandbox, boots it, pulls the image, works out its ports and
-      volumes, starts it and gives you the URL — no existing VM needed.
-      <b>Ports you name below are applied at boot</b>, so nothing has to restart.
+      volumes, starts it and gives you the URL.
     </div>
-    <div style="margin-bottom:12px">
-      <label for="qPreset">Start from a preset — fills in everything below</label>
+    <div style="margin-bottom:10px">
+      <label for="qPreset">Preset (optional)</label>
       <select id="qPreset"></select>
     </div>
-    <div class="grid g-create">
-      <div><label for="qImg">Image</label><input id="qImg" placeholder="leesonaa/immich" autocomplete="off"></div>
-      <div><label for="qName">Sandbox name (optional)</label><input id="qName" placeholder="(from image)" autocomplete="off"></div>
-    </div>
-    <div class="grid g-set" style="margin-top:10px">
-      <div><label for="qMem">Memory (MB)</label><input id="qMem" type="number" value="2048" min="256" step="128"></div>
-      <div><label for="qCpu">vCPUs</label><input id="qCpu" type="number" value="2" min="1" max="8"></div>
-      <div><label for="qEnv">Env (comma separated)</label><input id="qEnv" placeholder="TZ=UTC"></div>
-    </div>
-    <div style="margin-top:10px"><label for="qPorts">Ports (host:guest) — leave blank to derive them from the image</label>
-      <input id="qPorts" placeholder="8123:8123"></div>
-    <div style="margin-top:10px"><label for="qVols">Volumes (host:container) — for images that declare none</label>
-      <input id="qVols" placeholder="/opt/app/config:/config"></div>
-    <div class="btns" style="margin-top:12px;align-items:center">
+    <div class="grid g-run">
+      <div><label for="qImg">Image</label><input id="qImg" placeholder="leesonaa/immich" autocomplete="off" autofocus></div>
       <button class="primary" id="qGo">Create sandbox and deploy</button>
-      <label class="chk"><input type="checkbox" id="qPriv"> privileged</label>
-      <label class="chk"><input type="checkbox" id="qHostNet"> host network</label>
-      <label class="chk"><input type="checkbox" id="qConsole"> show boot console window</label>
     </div>
+
+    <details id="qMore" style="margin-top:14px">
+      <summary>Options — the defaults are usually fine</summary>
+      <div class="grid g-set" style="margin-top:12px">
+        <div><label for="qName">Sandbox name</label><input id="qName" placeholder="(from image)" autocomplete="off"></div>
+        <div><label for="qMem">Memory (MB)</label><input id="qMem" type="number" value="2048" min="256" step="128"></div>
+        <div><label for="qCpu">vCPUs</label><input id="qCpu" type="number" value="2" min="1" max="8"></div>
+      </div>
+      <div style="margin-top:10px"><label for="qPorts">Ports (host:guest) — blank means derive them from the image</label>
+        <input id="qPorts" placeholder="8123:8123"></div>
+      <div style="margin-top:10px"><label for="qVols">Volumes (host:container) — for images that declare none</label>
+        <input id="qVols" placeholder="/opt/app/config:/config"></div>
+      <div style="margin-top:10px"><label for="qEnv">Env (comma separated)</label>
+        <input id="qEnv" placeholder="TZ=UTC"></div>
+      <div class="btns" style="margin-top:12px;align-items:center">
+        <label class="chk"><input type="checkbox" id="qPriv"> privileged</label>
+        <label class="chk"><input type="checkbox" id="qHostNet"> host network</label>
+        <label class="chk"><input type="checkbox" id="qConsole"> show boot console window</label>
+      </div>
+    </details>
     <div id="qInfo" class="hint"></div>
   </div>
 
@@ -872,10 +880,20 @@ if (qPreset){
     $('#qEnv').value = p.env || '';
     $('#qPriv').checked = !!p.privileged;
     $('#qHostNet').checked = !!p.hostNetwork;
-    $('#qInfo').textContent = p.note || '';
+    // if the preset needs non-default switches, show them rather than
+    // silently setting things the user cannot see
+    const extra = [];
+    if (p.privileged) extra.push('privileged');
+    if (p.hostNetwork) extra.push('host network');
+    if (extra.length) $('#qMore').open = true;
+    $('#qInfo').textContent = [p.note, extra.length ? 'Sets: ' + extra.join(', ') + '.' : ''].filter(Boolean).join(' ');
     toast('Filled in ' + p.label + ' — press Create sandbox and deploy', 'ok');
   };
 }
+// Enter in the image box submits: that is the entire point of this card.
+$('#qImg').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); $('#qGo').click(); }
+});
 $('#qGo').onclick = (e) => {
   const image = $('#qImg').value.trim();
   if (!image) return toast('enter an image reference', 'err');

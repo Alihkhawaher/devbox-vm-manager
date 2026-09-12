@@ -253,9 +253,29 @@ type an image, press "Create sandbox and deploy"
 ```
 
 **Ports you name up front are written to the VM before its first boot**, so QEMU
-applies those forwards at launch and nothing restarts. Ports that can only be
-learned by inspecting the image cost one extra restart (~90s), because QEMU fixes
-port forwards at launch time and cannot add one to a running VM.
+applies those forwards at launch. Ports discovered by inspecting the image are
+added to the **running** VM through QEMU's monitor (`hostfwd_add`), which is why
+a deploy no longer costs a restart. The monitor listens on loopback only, on a
+port derived from the SSH port, and the manager falls back to a restart if the
+monitor is unavailable (for example a VM started before this existed).
+
+### Container port vs guest port vs host port
+
+These are three different things and conflating them caused a real bug:
+
+| | meaning |
+|---|---|
+| **container** | what the process listens on inside the container |
+| **guest** | the port it is published on inside the VM |
+| **host** | the Windows port QEMU forwards to `guest` |
+
+`8080:80` therefore means: publish the container's port 80 on the VM's port
+8080, and forward Windows 8080 to it. The guest port is picked free, because two
+containers in one VM cannot both publish port 80 — which is exactly what used to
+fail with `Bind for 0.0.0.0:80 failed: port is already allocated`.
+
+A failed `docker run` is now detected by its **exit code**: it still prints a
+64-hex line, so the old code reported success after a real failure.
 
 ### Be careful with multi-container apps
 

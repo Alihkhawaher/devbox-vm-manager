@@ -498,6 +498,44 @@ function netdevFor(vm) {
   return nd;
 }
 
+// QEMU fixes host forwards at launch, so adding one used to mean restarting the
+// VM (~90s). Its monitor can add them to a RUNNING vm instead, which removes that
+// cost entirely. The monitor listens on loopback only, on a port derived from the
+// SSH port so each VM gets its own.
+const monitorPortFor = (vm) => 25000 + (vm.port - 2222);
+
+function monitorCmd(port, cmd, timeoutMs) {
+  return new Promise((resolve) => {
+    let buf = '', settled = false;
+    let s;
+    const done = (v) => { if (settled) return; settled = true; try { s.destroy(); } catch (e) {} resolve(v); };
+    s = net.connect({ host: '127.0.0.1', port: port });
+    s.setTimeout(timeoutMs || 6000, () => done(buf || 'TIMEOUT'));
+    s.on('error', (e) => done('ERROR: ' + e.message));
+    s.on('connect', () => setTimeout(() => s.write(cmd + '\n'), 150));
+    s.on('data', (d) => {
+      buf += d.toString();
+      // the monitor answers with a "(qemu) " prompt once the command is done
+      if (buf.length > cmd.length && /\(qemu\)/.test(buf)) setTimeout(() => done(buf), 250);
+    });
+  });
+}
+
+async function addForwardLive(vm, host, guest) {
+  const mp = monitorPortFor(vm);
+  if (!(await portListening(mp, 900))) return { ok: false, why: 'no monitor listening on ' + mp };
+  const raw = await monitorCmd(mp, 'hostfwd_add n0 tcp::' + host + '-:' + guest);
+  const body = String(raw).replace(/\(qemu\)/g, '').trim();
+  if (/could not|error|invalid|unknown|not found|failed/i.test(body)) {
+    return { ok: false, why: body.slice(0, 160) || 'monitor rejected the command' };
+  }
+  for (let i = 0; i < 12; i++) {
+    if (await portListening(host, 500)) return { ok: true };
+    await new Promise((r) => setTimeout(r, 350));
+  }
+  return { ok: false, why: 'accepted but port ' + host + ' never began listening' };
+}
+
 function parsePortSpec(spec, sshPort) {
   const out = [];
   for (const part of String(spec || '').split(',')) {
@@ -570,6 +608,9 @@ async function opStart(name, showConsole) {
     '-netdev', netdevFor(vm),
     '-device', 'virtio-net-pci,netdev=n0,mac=' + macForPort(vm.port),
     '-nographic', '-no-reboot',
+    // keep the monitor off stdio (so the serial console stays readable) and put
+    // it on loopback where the manager can add port forwards at runtime
+    '-monitor', 'tcp:127.0.0.1:' + monitorPortFor(vm) + ',server,nowait',
   ];
 
   if (showConsole) {
@@ -1133,43 +1174,69 @@ async function opDeploy(name, o) {
   }
   if (explicit.length && !tcpPorts.length) tlog('Image declares no ports - using the ports you supplied: ' + explicit.map((q) => q.host + '->' + q.guest).join(', '));
 
-  const taken = new Set();
-  for (const [n2, v2] of Object.entries(state.vms)) { taken.add(v2.port); for (const q of (v2.ports || [])) taken.add(q.host); }
-  const haveGuest = new Set((vm.ports || []).map((q) => q.guest));
+  // A port mapping really has THREE ports, and conflating them was a bug:
+  //   container - what the process listens on inside the container
+  //   guest     - the port it is published on inside the VM
+  //   host      - the Windows port that QEMU forwards to `guest`
+  // An explicit "8080:80" means host 8080 -> container 80; the guest port is
+  // picked free, because two containers in one VM cannot both publish port 80.
+  const hostTaken = new Set();
+  for (const [n2, v2] of Object.entries(state.vms)) {
+    hostTaken.add(v2.port);
+    for (const q of (v2.ports || [])) hostTaken.add(q.host);
+  }
+  const guestTaken = new Set((vm.ports || []).map((q) => q.guest));
   const added = [];
   const want = explicit.slice();
   for (const gp of tcpPorts) if (!want.some((w) => w.guest === gp)) want.push({ host: null, guest: gp });
   for (const w of want) {
-    if (haveGuest.has(w.guest)) continue;
-    let hp = w.host || w.guest;
-    while (taken.has(hp)) hp++;
-    added.push({ host: hp, guest: w.guest });
-    taken.add(hp);
-    haveGuest.add(w.guest);
+    // re-deploying this same container must reuse the ports it already owns,
+    // otherwise every deploy would pile up another mapping
+    if ((vm.ports || []).some((q) => q.owner === cname && (q.container || q.guest) === w.guest)) continue;
+    let gp = w.host || w.guest;
+    while (guestTaken.has(gp) || gp === 22) gp++;
+    let hp = w.host || gp;
+    while (hostTaken.has(hp) || hp === vm.port) hp++;
+    added.push({ host: hp, guest: gp, container: w.guest, owner: cname });
+    hostTaken.add(hp);
+    guestTaken.add(gp);
   }
   if (added.length) {
     vm.ports = (vm.ports || []).concat(added);
     saveState();
-    tlog('Step 3/5: new port mappings -> ' + added.map((q) => q.host + '->' + q.guest).join(', '));
+    tlog('Step 3/5: new port mappings -> ' + added.map((q) =>
+      q.host + '->' + q.guest + (q.container !== q.guest ? ' (container ' + q.container + ')' : '')).join(', '));
   } else {
     tlog('Step 3/5: no new port mappings needed');
   }
 
-  // 4. QEMU fixes forwards at launch, so a restart may be required
+  // 4. Try to add the forwards to the RUNNING vm via the monitor; only pay for a
+  //    restart if that is not possible.
   if (added.length && !o.noRestart) {
-    tlog('Step 4/5: restarting the VM so QEMU picks up the new forwards (~90s)...');
-    await opStop(nm, false);
-    beginTask('deploy');
-    if (!(await waitPortFree(vm.port, 25000))) tlog('Warning: port ' + vm.port + ' still busy; trying anyway');
-    await opStart(nm, false);
-    beginTask('deploy');
-    let up = false;
-    for (let i = 0; i < 30; i++) {
-      if (await probeSsh(vm.port, 2000)) { up = true; break; }
-      await new Promise((r) => setTimeout(r, 4000));
+    tlog('Step 4/5: adding the new forwards to the running VM...');
+    let allLive = true, why = '';
+    for (const q of added) {
+      const r = await addForwardLive(vm, q.host, q.guest);
+      if (!r.ok) { allLive = false; why = r.why || 'unknown'; break; }
+      tlog('  ' + q.host + ' -> ' + q.guest + ' is live');
     }
-    if (!up) throw new Error('the VM did not come back after the restart');
-    tlog('VM is back up');
+    if (allLive) {
+      tlog('Step 4/5: applied live through the QEMU monitor - no restart needed.');
+    } else {
+      tlog('Step 4/5: could not apply live (' + why + ') - restarting the VM instead (~90s)...');
+      await opStop(nm, false);
+      beginTask('deploy');
+      if (!(await waitPortFree(vm.port, 25000))) tlog('Warning: port ' + vm.port + ' still busy; trying anyway');
+      await opStart(nm, false);
+      beginTask('deploy');
+      let up = false;
+      for (let i = 0; i < 30; i++) {
+        if (await probeSsh(vm.port, 2000)) { up = true; break; }
+        await new Promise((r) => setTimeout(r, 4000));
+      }
+      if (!up) throw new Error('the VM did not come back after the restart');
+      tlog('VM is back up');
+    }
   } else if (added.length) {
     tlog('Step 4/5: skipped restart - ports will work after you restart the VM yourself');
   } else {
@@ -1178,13 +1245,15 @@ async function opDeploy(name, o) {
 
   // 5. run it (idempotent: replace a container of the same name)
   const volDir = '/opt/' + cname;
-  const guestPorts = Array.from(new Set(
-    (vm.ports || []).filter((q) => tcpPorts.includes(q.guest) || explicit.some((w) => w.guest === q.guest)).map((q) => q.guest)
-  ));
+  // which mappings belong to THIS container: the ones we just created, or, for
+  // containers deployed before owner tracking existed, the ones matching the image
+  let pubs = (vm.ports || []).filter((q) => q.owner === cname);
+  if (!pubs.length) pubs = (vm.ports || []).filter((q) =>
+    tcpPorts.includes(q.container || q.guest) || explicit.some((w) => w.guest === (q.container || q.guest)));
   const args = ['docker', 'run', '-d', '--name', shq(cname), '--restart', shq(o.restartPolicy || 'unless-stopped')];
   if (o.privileged) args.push('--privileged');
   if (o.hostNetwork) args.push('--network', 'host');
-  else for (const gp of guestPorts) args.push('-p', shq(gp + ':' + gp));
+  else for (const q of pubs) args.push('-p', shq(q.guest + ':' + (q.container || q.guest)));
   for (const env of String(o.env || '').split(',').map((s) => s.trim()).filter(Boolean)) args.push('-e', shq(env));
   for (const v of info.volumes) args.push('-v', shq(volDir + v.replace(/\//g, '_') + ':' + v));
   for (const v of String(o.volumes || '').split(',').map((s) => s.trim()).filter(Boolean)) args.push('-v', shq(v));
@@ -1196,15 +1265,26 @@ async function opDeploy(name, o) {
   tlog('$ ' + args.join(' '));
   const r = await sshExec(vm.port,
     LOCALTIME_FIX + 'docker rm -f ' + shq(cname) + ' >/dev/null 2>&1; ' +
-    (mk ? 'mkdir -p ' + mk + ' && ' : '') + args.join(' ') + ' 2>&1 | tail -5', 900000);
-  tlog(r.out.trim());
+    (mk ? 'mkdir -p ' + mk + ' && ' : '') + args.join(' ') + ' 2>&1; echo "__RC=$?"', 900000);
+  // A failed `docker run` still prints a 64-hex line, so the old code reported
+  // success after a real failure (e.g. "port is already allocated"). Check the
+  // exit code rather than trusting the output shape.
+  const rawOut = r.out.trim();
+  const rcMatch = rawOut.match(/__RC=(\d+)\s*$/);
+  const rc = rcMatch ? parseInt(rcMatch[1], 10) : 0;
+  const body = rawOut.replace(/__RC=\d+\s*$/, '').trim();
+  tlog(body.slice(-1500) || '(no output)');
+  if (rc !== 0) {
+    const last = body.split('\n').map((x) => x.trim()).filter(Boolean).pop() || 'no output';
+    throw new Error('docker run failed (exit ' + rc + '): ' + last.slice(0, 240));
+  }
 
   // report the URLs the user can actually click
   const urls = [];
-  for (const q of (vm.ports || [])) if (guestPorts.includes(q.guest)) urls.push('http://127.0.0.1:' + q.host);
+  for (const q of pubs) urls.push('http://127.0.0.1:' + q.host);
   tlog('Container "' + cname + '" started from ' + o.image);
   if (urls.length) tlog('Reachable at: ' + urls.join('  '));
-  else if (!guestPorts.length) tlog('No ports to expose - this image declares none and none were supplied.');
+  else tlog('No ports exposed - this image declares none and none were supplied.');
   endTask(null);
   return { container: cname, urls: urls, ports: vm.ports || [] };
 }
@@ -1273,12 +1353,19 @@ async function opQuickDeploy(o) {
     taken.add(v2.port);
     for (const q of (v2.ports || [])) taken.add(q.host);
   }
+  const qcname = safeName(o.containerName || name);
   const pre = [];
+  const preGuests = new Set();
   for (const w of explicit) {
+    // "host:container" - the guest port is chosen free, and the container port is
+    // what the image actually listens on
+    let gp = w.host;
+    while (preGuests.has(gp) || gp === 22) gp++;
     let hp = w.host;
     while (taken.has(hp) || hp === vm.port) hp++;
     taken.add(hp);
-    pre.push({ host: hp, guest: w.guest });
+    preGuests.add(gp);
+    pre.push({ host: hp, guest: gp, container: w.guest, owner: qcname });
   }
   if (pre.length) { vm.ports = pre; saveState(); }
   phase(pre.length
