@@ -508,6 +508,28 @@ function renderDocker(name, d){
      + '<div class="btns" style="margin-top:10px"><button class="primary sm" id="cGo">Deploy</button></div>'
      + '<div class="hint">The manager applies the <code>/etc/localtime</code> fix before deploying, so re-deploying is safe.</div>';
 
+  h += '<h2 style="margin-top:20px">Deploy an image automatically</h2>'
+     + '<div class="hint" style="margin:0 0 10px">Paste any image reference — the manager inspects it for '
+     + 'exposed ports and volumes, maps the ports through to Windows, creates the volume directories, '
+     + 'restarts the VM if new forwards are needed, and starts it. You should not need the image\'s docs.</div>'
+     + '<div class="grid g-run">'
+     + '<div><label for="dImg">Image</label><input id="dImg" placeholder="ghcr.io/home-assistant/home-assistant:stable"></div>'
+     + '<div><label for="dCName">Container name</label><input id="dCName" placeholder="(from image)"></div>'
+     + '<div><label for="dEnv">Env (comma separated)</label><input id="dEnv" placeholder="TZ=UTC"></div>'
+     + '<button class="primary" id="dGo">Deploy</button></div>'
+     + '<div style="margin-top:10px"><label for="dPorts">Ports (host:guest — needed for images that declare none, e.g. Home Assistant)</label>'
+     + '<input id="dPorts" placeholder="8123:8123"></div>'
+     + '<div style="margin-top:10px"><label for="dVols">Extra volumes (host:container)</label>'
+     + '<input id="dVols" placeholder="/opt/app/config:/config"></div>'
+     + '<div class="btns" style="margin-top:10px;align-items:center">'
+     + '<button class="sm" id="dInspect">Inspect only (pull + show what it needs)</button>'
+     + '<label style="display:flex;align-items:center;gap:6px;margin:0;text-transform:none;letter-spacing:0;font-size:12px;color:var(--muted);cursor:pointer">'
+     + '<input type="checkbox" id="dPriv" style="width:auto;margin:0"> privileged</label>'
+     + '<label style="display:flex;align-items:center;gap:6px;margin:0;text-transform:none;letter-spacing:0;font-size:12px;color:var(--muted);cursor:pointer">'
+     + '<input type="checkbox" id="dHostNet" style="width:auto;margin:0"> host network</label>'
+     + '</div>'
+     + '<div id="dInfo" class="hint"></div>';
+
   h += '<h2 style="margin-top:20px">Networks &amp; volumes</h2><div class="mono">'
      + d.networks.map(x => x.name + ' (' + x.driver + ')').join('<br>')
      + (d.volumes.length ? '<br>' + d.volumes.map(v => v.name).join('<br>') : '')
@@ -533,6 +555,39 @@ function renderDocker(name, d){
   };
   const cg = $('#cGo'); if (cg) cg.onclick = (e) => runTask('/api/vm/compose',
     { name, project: $('#cName').value.trim(), yaml: $('#cText').value }, 'Deploy compose', e.target);
+
+  const depOpts = () => ({
+    name: name,
+    image: $('#dImg').value.trim(),
+    containerName: $('#dCName').value.trim(),
+    env: $('#dEnv').value.trim(),
+    ports: $('#dPorts') ? $('#dPorts').value.trim() : '',
+    volumes: $('#dVols') ? $('#dVols').value.trim() : '',
+    privileged: $('#dPriv').checked,
+    hostNetwork: $('#dHostNet').checked,
+  });
+  const insBtn = $('#dInspect');
+  if (insBtn) insBtn.onclick = async (e) => {
+    const img = $('#dImg').value.trim();
+    if (!img) return toast('enter an image reference', 'err');
+    e.target.disabled = true;
+    try {
+      const j = await post('/api/vm/docker/inspect', { name, image: img });
+      const i = j.info;
+      $('#dInfo').innerHTML = 'That image wants: <b>ports</b> '
+        + ((i.ports || []).map(p => p.port + '/' + p.proto).join(', ') || 'none declared')
+        + ' &nbsp; <b>volumes</b> ' + ((i.volumes || []).join(', ') || 'none declared')
+        + '<br>Press <b>Deploy</b> and the manager will map the TCP ports, create those volumes and start it.';
+      toast('Inspected ' + img + ' - see the summary below the button', 'ok');
+    } catch (err) { toast(err.message, 'err'); }
+    e.target.disabled = false;
+  };
+  const dGo = $('#dGo');
+  if (dGo) dGo.onclick = (e) => {
+    const o = depOpts();
+    if (!o.image) return toast('enter an image reference', 'err');
+    runTask('/api/vm/docker/deploy', o, 'Deploy image', e.target);
+  };
 }
 function showText(title, text){
   const w = window.open('', '_blank', 'width=900,height=600');

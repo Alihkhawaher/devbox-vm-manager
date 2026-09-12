@@ -151,6 +151,61 @@ GET  /api/log?name=                 serial log tail
 GET  /api/task                      progress of the current long operation
 ```
 
+### Deploy an image automatically (no docs required)
+
+Paste any image reference into the Docker tab and the manager works out what it
+needs by **inspecting the image** rather than asking you to read its README:
+
+1. Pull the image if it is not local.
+2. `docker image inspect` → read `ExposedPorts` and `Volumes`.
+3. Map every exposed **TCP** port host→guest, skipping anything already claimed
+   by another VM, so it becomes reachable from Windows.
+4. Restart the VM automatically if new forwards were added — QEMU fixes port
+   forwards at launch, so this cannot be deferred.
+5. Create one volume directory per declared volume (`/opt/<container><path>`) and
+   `docker run -d --restart unless-stopped` with the derived ports, volumes,
+   env vars, and optional `--privileged` / `--network host`.
+
+It reports the clickable URL when it finishes, e.g.
+`ghcr.io/home-assistant/home-assistant:stable` → maps `8123` and announces
+`http://127.0.0.1:8123`.
+
+**Inspect only** does steps 1–2 without changing anything, so you can see what an
+image wants first.
+
+#### When inspection cannot work — and the override
+
+Inspection only helps if the image declares its needs. **Home Assistant is the
+counterexample**: its image uses neither `EXPOSE` nor `VOLUME`, so
+
+```
+Config.ExposedPorts=null
+Config.Volumes=null
+```
+
+inspection legitimately finds nothing, and the container would come up
+unreachable with an ephemeral config. For images like this, fill in the two
+override boxes:
+
+| Field | Home Assistant |
+|---|---|
+| **Ports** (host:guest) | `8123:8123` |
+| **Extra volumes** (host:container) | `/opt/homeassistant/config:/config` |
+
+The **Ports** box supplements (or replaces) whatever inspection found; the
+**Extra volumes** box adds mounts the image does not declare. Deploys are
+idempotent — an existing container of the same name is replaced, so re-deploying
+after changing these is safe and keeps the mounted config.
+
+Verified end to end: `ghcr.io/home-assistant/home-assistant:stable` with host
+networking, privileged, `8123:8123`, and a `/config` mount comes up on
+`http://127.0.0.1:8123` and serves its onboarding page. First start took ~4
+minutes under emulation — it is not hung, `docker logs` shows it progressing.
+
+Other honest limits: an image wanting a database, a secret, or a specific
+`--cap-add` still needs those in the **Env** box or a compose file, and the
+automatic VM restart costs ~90 seconds.
+
 ## Running services (Docker, web apps)
 
 Containers need kernel namespaces and cgroups, **not** hardware virtualization, so

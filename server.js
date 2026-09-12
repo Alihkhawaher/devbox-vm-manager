@@ -532,6 +532,18 @@ async function opCreate(name, mem, cpus, port, baseName) {
   return vm;
 }
 
+// A just-stopped QEMU can hold its listening socket for a moment after the
+// process dies. Starting a replacement immediately then fails the "port in use"
+// check, so wait for the socket to actually clear first.
+async function waitPortFree(port, timeoutMs) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < (timeoutMs || 20000)) {
+    if (!(await portListening(port, 600))) return true;
+    await new Promise((r) => setTimeout(r, 700));
+  }
+  return !(await portListening(port, 600));
+}
+
 async function opStart(name, showConsole) {
   beginTask('start');
   name = safeName(name);
@@ -1037,6 +1049,162 @@ async function opDockerLogs(name, container) {
 }
 
 // --------------------------------------------------------------------------
+// deploy an image automatically
+//
+// Instead of making the user read an image's docs, inspect it: the image's
+// ExposedPorts and Volumes say what it needs. We then map every exposed TCP
+// port host->guest (so it is reachable from Windows), create a volume dir per
+// declared volume, and run it. QEMU fixes port forwards at launch, so if new
+// mappings are needed the VM is restarted automatically as part of the deploy.
+// --------------------------------------------------------------------------
+function parseInspect(out) {
+  const parts = String(out).split('|');
+  const j = (s) => { try { return JSON.parse(s); } catch (e) { return null; } };
+  const ports = Object.keys(j(parts[0]) || {}).map((k) => {
+    const m = k.match(/^(\d+)\/(tcp|udp)$/);
+    return m ? { port: parseInt(m[1], 10), proto: m[2] } : null;
+  }).filter(Boolean);
+  const volumes = Object.keys(j(parts[1]) || {});
+  const env = (j(parts[2]) || []).filter((e) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(e));
+  return { ports: ports, volumes: volumes, env: env, cmd: j(parts[3]), entrypoint: j(parts[4]) };
+}
+
+async function inspectImage(vm, image) {
+  const ins = await sshExec(vm.port,
+    'docker image inspect ' + shq(image) +
+    ' --format "{{json .Config.ExposedPorts}}|{{json .Config.Volumes}}|{{json .Config.Env}}|{{json .Config.Cmd}}|{{json .Config.Entrypoint}}"', 60000);
+  if (!ins.ok || !ins.out.trim()) throw new Error('could not inspect the image (is it pulled?)');
+  return parseInspect(ins.out.trim());
+}
+
+async function opImageInspect(name, image) {
+  beginTask('image-inspect');
+  if (!image) throw new Error('an image reference is required');
+  const vm = await dockerVm(name);
+  tlog('Checking for ' + image + ' ...');
+  const p = await sshExec(vm.port,
+    'docker image inspect ' + shq(image) + ' >/dev/null 2>&1 && echo ALREADY_PRESENT || (echo PULLING && docker pull ' + shq(image) + ' 2>&1 | tail -4)', 1800000);
+  tlog(p.out.trim());
+  const info = await inspectImage(vm, image);
+  tlog('Declared TCP ports: ' + (info.ports.filter((x) => x.proto === 'tcp').map((x) => x.port).join(', ') || '(none)'));
+  tlog('Declared volumes  : ' + (info.volumes.join(', ') || '(none)'));
+  endTask(null);
+  return info;
+}
+
+async function opDeploy(name, o) {
+  beginTask('deploy');
+  const nm = safeName(name);
+  const vm = state.vms[nm];
+  if (!vm) throw new Error('no such sandbox: ' + nm);
+  if (!o.image) throw new Error('an image reference is required');
+  if (!(await pidForPort(vm.port))) throw new Error('"' + nm + '" is not running - start it first');
+  if (!(await probeSsh(vm.port, 3000))) throw new Error('the guest is still booting');
+
+  const cname = safeName(o.containerName || o.image.split('/').pop().split(':')[0]);
+
+  // 1. make sure the image is local
+  tlog('Step 1/5: pulling ' + o.image + ' if needed...');
+  const p = await sshExec(vm.port,
+    'docker image inspect ' + shq(o.image) + ' >/dev/null 2>&1 && echo ALREADY_PRESENT || (echo PULLING && docker pull ' + shq(o.image) + ' 2>&1 | tail -4)', 1800000);
+  tlog(p.out.trim());
+
+  // 2. ask the image what it needs
+  tlog('Step 2/5: inspecting the image for ports and volumes...');
+  const info = await inspectImage(vm, o.image);
+  const tcpPorts = info.ports.filter((x) => x.proto === 'tcp').map((x) => x.port);
+  tlog('Exposed TCP ports: ' + (tcpPorts.join(', ') || '(none)'));
+  tlog('Declared volumes : ' + (info.volumes.join(', ') || '(none)'));
+
+  // 3. work out the host->guest mappings, avoiding ports already claimed.
+  // Some images (Home Assistant is the classic case) declare NOTHING - no
+  // EXPOSE, no VOLUME - so the caller can pass explicit ports to supplement
+  // what inspection found.
+  const explicit = [];
+  for (const part of String(o.ports || '').split(',').map((s) => s.trim()).filter(Boolean)) {
+    const m = part.match(/^(\d{1,5})(?::(\d{1,5}))?$/);
+    if (!m) throw new Error('bad port spec "' + part + '" - use host:guest, e.g. 8123:8123');
+    explicit.push({ host: parseInt(m[1], 10), guest: parseInt(m[2] || m[1], 10) });
+  }
+  if (explicit.length && !tcpPorts.length) tlog('Image declares no ports - using the ports you supplied: ' + explicit.map((q) => q.host + '->' + q.guest).join(', '));
+
+  const taken = new Set();
+  for (const [n2, v2] of Object.entries(state.vms)) { taken.add(v2.port); for (const q of (v2.ports || [])) taken.add(q.host); }
+  const haveGuest = new Set((vm.ports || []).map((q) => q.guest));
+  const added = [];
+  const want = explicit.slice();
+  for (const gp of tcpPorts) if (!want.some((w) => w.guest === gp)) want.push({ host: null, guest: gp });
+  for (const w of want) {
+    if (haveGuest.has(w.guest)) continue;
+    let hp = w.host || w.guest;
+    while (taken.has(hp)) hp++;
+    added.push({ host: hp, guest: w.guest });
+    taken.add(hp);
+    haveGuest.add(w.guest);
+  }
+  if (added.length) {
+    vm.ports = (vm.ports || []).concat(added);
+    saveState();
+    tlog('Step 3/5: new port mappings -> ' + added.map((q) => q.host + '->' + q.guest).join(', '));
+  } else {
+    tlog('Step 3/5: no new port mappings needed');
+  }
+
+  // 4. QEMU fixes forwards at launch, so a restart may be required
+  if (added.length && !o.noRestart) {
+    tlog('Step 4/5: restarting the VM so QEMU picks up the new forwards (~90s)...');
+    await opStop(nm, false);
+    beginTask('deploy');
+    if (!(await waitPortFree(vm.port, 25000))) tlog('Warning: port ' + vm.port + ' still busy; trying anyway');
+    await opStart(nm, false);
+    beginTask('deploy');
+    let up = false;
+    for (let i = 0; i < 30; i++) {
+      if (await probeSsh(vm.port, 2000)) { up = true; break; }
+      await new Promise((r) => setTimeout(r, 4000));
+    }
+    if (!up) throw new Error('the VM did not come back after the restart');
+    tlog('VM is back up');
+  } else if (added.length) {
+    tlog('Step 4/5: skipped restart - ports will work after you restart the VM yourself');
+  } else {
+    tlog('Step 4/5: no restart needed');
+  }
+
+  // 5. run it (idempotent: replace a container of the same name)
+  const volDir = '/opt/' + cname;
+  const guestPorts = Array.from(new Set(
+    (vm.ports || []).filter((q) => tcpPorts.includes(q.guest) || explicit.some((w) => w.guest === q.guest)).map((q) => q.guest)
+  ));
+  const args = ['docker', 'run', '-d', '--name', shq(cname), '--restart', shq(o.restartPolicy || 'unless-stopped')];
+  if (o.privileged) args.push('--privileged');
+  if (o.hostNetwork) args.push('--network', 'host');
+  else for (const gp of guestPorts) args.push('-p', shq(gp + ':' + gp));
+  for (const env of String(o.env || '').split(',').map((s) => s.trim()).filter(Boolean)) args.push('-e', shq(env));
+  for (const v of info.volumes) args.push('-v', shq(volDir + v.replace(/\//g, '_') + ':' + v));
+  for (const v of String(o.volumes || '').split(',').map((s) => s.trim()).filter(Boolean)) args.push('-v', shq(v));
+  args.push(shq(o.image));
+
+  tlog('Step 5/5: creating volume dirs and starting the container...');
+  const mk = info.volumes.map((v) => volDir + v.replace(/\//g, '_')).join(' ');
+  tlog('$ docker rm -f ' + cname + ' (ignore if absent)');
+  tlog('$ ' + args.join(' '));
+  const r = await sshExec(vm.port,
+    LOCALTIME_FIX + 'docker rm -f ' + shq(cname) + ' >/dev/null 2>&1; ' +
+    (mk ? 'mkdir -p ' + mk + ' && ' : '') + args.join(' ') + ' 2>&1 | tail -5', 900000);
+  tlog(r.out.trim());
+
+  // report the URLs the user can actually click
+  const urls = [];
+  for (const q of (vm.ports || [])) if (guestPorts.includes(q.guest)) urls.push('http://127.0.0.1:' + q.host);
+  tlog('Container "' + cname + '" started from ' + o.image);
+  if (urls.length) tlog('Reachable at: ' + urls.join('  '));
+  else if (!guestPorts.length) tlog('No ports to expose - this image declares none and none were supplied.');
+  endTask(null);
+  return { container: cname, urls: urls, ports: vm.ports || [] };
+}
+
+// --------------------------------------------------------------------------
 // HTTP API
 // --------------------------------------------------------------------------
 function send(res, code, body, type) {
@@ -1161,6 +1329,16 @@ const server = http.createServer(async (req, res) => {
       if (p === '/api/vm/freeze') {
         if (!guard(res)) return;
         try { await opFreeze(body.name, body.as); return send(res, 200, { ok: true }); }
+        catch (e) { endTask(e); return send(res, 400, { ok: false, error: String(e.message || e) }); }
+      }
+      if (p === '/api/vm/docker/inspect') {
+        if (!guard(res)) return;
+        try { const info = await opImageInspect(body.name, body.image); return send(res, 200, { ok: true, info: info }); }
+        catch (e) { endTask(e); return send(res, 400, { ok: false, error: String(e.message || e) }); }
+      }
+      if (p === '/api/vm/docker/deploy') {
+        if (!guard(res)) return;
+        try { const r = await opDeploy(body.name, body); return send(res, 200, { ok: true, result: r }); }
         catch (e) { endTask(e); return send(res, 400, { ok: false, error: String(e.message || e) }); }
       }
       if (p === '/api/vm/docker/install') {
