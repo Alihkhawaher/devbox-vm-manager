@@ -1,0 +1,65 @@
+#!/sbin/openrc-run
+# /etc/init.d/devbox-shares - mount the folders the devbox manager shares with
+# this VM (9P2000.L over TCP to the manager on the host, 10.0.2.2 via slirp).
+#
+# The share list comes from QEMU fw_cfg, which the manager passes at every VM
+# start with  -fw_cfg name=opt/devbox/shares,file=<per-VM file>  so it needs
+# no SSH, is readable by root only, and survives reboots inside the VM.
+# One share per line:  <port> <shareId>:<secret> <guest path> <rw|ro>
+#
+# Install:  cp devbox-shares.initd /etc/init.d/devbox-shares
+#           chmod 755 /etc/init.d/devbox-shares && rc-update add devbox-shares default
+# Needs the linux-virt modules 9p, 9pnet, 9pnet_fd, netfs, qemu_fw_cfg.
+
+description="Mount devbox shared folders"
+CFG=/sys/firmware/qemu_fw_cfg/by_name/opt/devbox/shares/raw
+: ${DEVBOX_MSIZE:=524288}
+: ${DEVBOX_CACHE:=mmap}
+
+depend() {
+	need net
+	after firewall
+}
+
+start() {
+	ebegin "Mounting devbox shared folders"
+	modprobe -q qemu_fw_cfg 2>/dev/null
+	modprobe -q 9pnet_fd 2>/dev/null
+	modprobe -q 9p 2>/dev/null
+	if [ ! -r "$CFG" ]; then
+		eend 0
+		return 0
+	fi
+	rc=0
+	# uname=boot-<boot_id>: the server then closes this VM's mounts left over
+	# from earlier boots (slirp keeps them open across an in-VM reboot)
+	b=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+	while read -r port aname gpath gmode; do
+		[ -n "$gpath" ] || continue
+		mountpoint -q "$gpath" && continue
+		mkdir -p "$gpath"
+		opts="trans=tcp,port=$port,version=9p2000.L,msize=$DEVBOX_MSIZE,cache=$DEVBOX_CACHE,aname=$aname${b:+,uname=boot-$b}"
+		[ "$gmode" = ro ] && opts="$opts,ro"
+		n=0
+		until mount -t 9p -o "$opts" 10.0.2.2 "$gpath" 2>/dev/null; do
+			n=$((n + 1))
+			if [ $n -ge 5 ]; then
+				ewarn "could not mount $gpath"
+				rc=1
+				break
+			fi
+			sleep $n
+		done
+	done < "$CFG"
+	eend $rc
+}
+
+stop() {
+	ebegin "Unmounting devbox shared folders"
+	if [ -r "$CFG" ]; then
+		while read -r port aname gpath gmode; do
+			[ -n "$gpath" ] && mountpoint -q "$gpath" && umount -l "$gpath"
+		done < "$CFG"
+	fi
+	eend 0
+}

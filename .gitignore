@@ -1,23 +1,55 @@
 # ---- local runtime state: never commit ----
+# vms.json beside the code is the v1 location (moved into the data folder
+# once by v2); vms.json.* covers .bak, .tmp, .corrupt-* and .migrated
 vms.json
-console.cmd
+vms.json.*
 source-check.txt
+
+# data folder (default data root for fresh installs) and anything the manager
+# writes under a data root: pid files/sockets, logs, the API access token,
+# partial downloads and the generated SSH key
+data/
+run/
+logs/
+manager-token
+*.part
+seed/
 
 # VM disks and logs (multi-GB, machine-specific)
 *.qcow2
 sandboxes/
 vm-bases/
-
-# generated launchers / logs
 *.log
-devbox-serial.log
 
-# throwaway browser profile used for UI checks
-.verifyprofile/
+# a data root under another name inside the checkout (README suggests
+# --data ./scratch for test instances), and the other things a data root
+# holds: container records (env values, share secrets), image cache,
+# kernel assets, microVM run dirs, volumes, downloads, managed QEMU
+scratch/
+containers.json
+containers.json.*
+/config.json
+/images/
+/kernel/
+/microvms/
+/volumes/
+/downloads/
+/qemu/
+*.qcow2.json
+*.initrd
+*.apk
+*.cpio
+
+# credentials that must never be committed, wherever they appear
+.env
+.env.*
+*.pem
+*.key
+id_dev
+id_dev.pub
 
 # ---- dependencies / OS cruft ----
 node_modules/
 .DS_Store
 Thumbs.db
 desktop.ini
-.gui-check/

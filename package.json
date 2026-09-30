@@ -1,0 +1,17 @@
+{
+  "name": "devbox-vm-manager",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Local control panel for QEMU sandbox VMs - Node standard library only, no dependencies, no admin rights.",
+  "license": "MIT",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test tests/",
+    "mcp": "node mcp-server.js",
+    "probe": "node tools/mcp-probe.js mcp-server.js"
+  }
+}

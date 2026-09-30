@@ -1,0 +1,19 @@
+# One line-ending policy for every clone, whatever the contributor's
+# core.autocrlf: text is stored and checked out with LF...
+* text=auto eol=lf
+
+# ...except Windows batch files, which cmd.exe reads most reliably as CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Files that run inside Linux guests must keep LF line endings on every
+# checkout (a CRLF init.sh or OpenRC service breaks the guest's shell):
+lib/microvm/init.sh text eol=lf
+lib/assets/devbox-shares.initd text eol=lf
+*.sh text eol=lf
+
+# Alpine's public signing keys: keep them exactly as shipped
+lib/microvm/keys/*.rsa.pub text eol=lf
+
+# Binaries
+*.png binary
