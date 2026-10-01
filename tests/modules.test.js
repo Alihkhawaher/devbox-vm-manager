@@ -15,7 +15,7 @@ const LIB = ['config', 'util', 'platform', 'state', 'tasks', 'ports', 'ssh', 'mo
   'install', 'vm', 'sessions', 'docker', 'deploy', 'http', 'client', 'route', 'shares', 'shares-routes',
   'oci/registry', 'oci/layers', 'oci/cpio', 'oci/images',
   'microvm/apk', 'microvm/tar', 'microvm/kmod', 'microvm/kernel', 'microvm/initramfs', 'microvm/qemu-args',
-  'microvm/hostcpu', 'microvm/plan', 'microvm/vmrun', 'microvm/qcow2', 'microvm/mkext4', 'microvm/volumes',
+  'microvm/hostcpu', 'microvm/plan', 'microvm/vmrun', 'microvm/qcow2', 'microvm/mkext4', 'microvm/rootdisk', 'microvm/volumes',
   'microvm/copyin', 'microvm/tail', 'microvm/args', 'microvm/run', 'microvm/store', 'microvm/containers', 'microvm/routes',
   'microvm/compat', 'microvm/facts', 'microvm/validate', 'microvm/logs',
   'mcp/protocol', 'mcp/tools', 'mcp/containers', 'mcp/shares',

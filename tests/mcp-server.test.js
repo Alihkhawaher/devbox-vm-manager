@@ -86,6 +86,27 @@ test('mcp-probe --expect: names the tools a server must list', () => {
   assert.deepEqual(probe.missingTools([{ name: 'a' }], []), []);
 });
 
+test('mcp-probe parameters: run_image / deploy_image must offer rootfs disk|ram; --expect-params names more', () => {
+  const probe = require('../tools/mcp-probe');
+  const tool = (name, props) => ({ name: name, inputSchema: { type: 'object', properties: props } });
+  const rootfs = { type: 'string', enum: ['disk', 'ram'], description: 'x' };
+  // the real tools pass
+  const T = require('../lib/mcp/tools');
+  const { createServer } = require('../lib/mcp/protocol');
+  const s = createServer({ name: 'devbox-vms', version: '2.0.0' });
+  for (const t of T.createTools({ connect: async () => { throw new Error('unused'); } })) s.addTool(t);
+  assert.deepEqual(probe.missingParams(s.listTools(), []), []);
+  // an old server: run_image without rootfs fails; tools that are not listed are not required
+  assert.deepEqual(probe.missingParams([tool('run_image', { image: { type: 'string' } })], []), ['run_image.rootfs (not a parameter)']);
+  assert.deepEqual(probe.missingParams([tool('status', {})], []), []);
+  assert.deepEqual(probe.missingParams([tool('run_image', { rootfs: { type: 'string', enum: ['disk'] } })], []), ['run_image.rootfs (enum lacks disk/ram)']);
+  assert.deepEqual(probe.missingParams([tool('run_image', { rootfs: rootfs })], []), []);
+  const o = probe.parseCli(['mcp-server.js', '--expect-params', 'run_image.rootfs, status.verbose']);
+  assert.deepEqual(o.expectParams, [{ tool: 'run_image', param: 'rootfs' }, { tool: 'status', param: 'verbose' }]);
+  assert.deepEqual(probe.missingParams([tool('run_image', { rootfs: rootfs }), tool('status', {})], o.expectParams), ['status.verbose (not a parameter)']);
+  assert.deepEqual(probe.missingParams([], [{ tool: 'x', param: 'y' }]), ['x.y (no tool x)']);
+});
+
 test('mcp-server.js --help and bad arguments: usage on stderr, stdout stays empty', () => {
   const { spawnSync } = require('child_process');
   const help = spawnSync(process.execPath, [SERVER, '--help'], { encoding: 'utf8', timeout: 15000, windowsHide: true, input: '' });

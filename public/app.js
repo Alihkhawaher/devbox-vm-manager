@@ -46,6 +46,19 @@
  *   runs in a container is untrusted. Routes that answer 501 (a manager built
  *   before the engine work) show "not available yet" instead of an error storm.
  *   Folder pickers use GET /api/fs/dirs inside the in-app modal.
+ *
+ * ROOT FILESYSTEM AND LIGHT PROFILE (SPEC-diskroot sections 9-11)
+ *   A container's root filesystem is "disk" (the default: a read-only image
+ *   disk shared per image plus the container's own writable layer, ~128 MB of
+ *   RAM whatever the image) or "ram" (opt-in: the whole image in memory,
+ *   reset at every start). The run form (Advanced), the container Settings
+ *   tab (applies at the next start) and the gear dialog (the default) set
+ *   it; rows show a Disk / RAM badge; a stopped disk-root container can
+ *   "Start fresh" (POST /api/container/start {fresh:true}). The gear dialog
+ *   also holds the light profile and the engine settings of config.json
+ *   (POST /api/settings; blank = the profile's default) and, without
+ *   hardware acceleration, the manager's accelHint (how to turn on nested
+ *   virtualization) - text only, commands in <code>.
  */
 (function () {
   'use strict';
@@ -1068,6 +1081,9 @@
       setBar($('#diskBar'), 0, '');
     }
     setText($('#accelTxt'), accelSummary(s));
+    // the smaller defaults are active (brief 4: status shows the light profile)
+    $('#lightTag').hidden = !(s.settings && s.settings.lightProfile);
+    $('#accelHow').hidden = !(s.accelHint && typeof s.accelHint === 'object');
     // containers are QEMU processes too: their guest memory is committed in
     // full on Windows, so say how much of "used" they account for
     const live = Array.from(CTRS.values()).filter(ctrLive);
@@ -1082,13 +1098,40 @@
   function accelSummary(s) {
     const a = (s.platform && s.platform.accel) || {};
     const forced = s.settings && s.settings.accel && s.settings.accel !== 'auto' ? s.settings.accel : null;
+    const ah = s.accelHint && typeof s.accelHint === 'object' ? s.accelHint : null;
     let t;
     if (a.detecting) t = 'Acceleration: checking what this PC supports...';
     else if (!a.available) t = 'Acceleration: known once QEMU is installed.';
     else if (a.recommended && a.recommended !== 'tcg') t = 'Acceleration: ' + accelName(a.recommended) + ' is available - VMs run at near-native speed.';
-    else t = 'Acceleration: no hardware accelerator found - VMs use TCG software emulation (works everywhere, but slower).';
+    else {
+      t = 'Acceleration: no hardware accelerator found - VMs and containers use TCG software emulation (works everywhere, but slower and heavier).';
+      if (ah && ah.insideVm) t += ' This PC is itself a virtual machine' + (ah.outerLabel ? ' (' + ah.outerLabel + ')' : '') + ': its nested virtualization is off.';
+    }
     if (forced) t += ' The global setting forces ' + accelName(forced) + '.';
     return t;
+  }
+  // ---- no hardware acceleration: how to turn it on (SPEC-diskroot 11) ----
+  // The manager's hint (install.accelHint) as nodes. All of it is text from
+  // the manager; `backticks` mark commands, shown as <code> - never markup.
+  function codeText(s) {
+    return String(s || '').split('`').map((p, i) => (i % 2 ? h('code', null, p) : p));
+  }
+  function accelHintNodes(ah) {
+    const out = [h('p', { class: 'ahint-sum' }, ah.summary || '')];
+    for (const k of Object.keys(ah.steps && typeof ah.steps === 'object' ? ah.steps : {})) {
+      const list = Array.isArray(ah.steps[k]) ? ah.steps[k] : [];
+      if (!list.length) continue;
+      out.push(h('div', { class: 'ahead' }, (ah.labels && ah.labels[k]) || k), h('ol', { class: 'asteps' }, list.map((x) => h('li', null, codeText(x)))));
+    }
+    const inner = Array.isArray(ah.inner) ? ah.inner : [];
+    if (inner.length) out.push(h('div', { class: 'ahead' }, 'On this PC'), h('ol', { class: 'asteps' }, inner.map((x) => h('li', null, codeText(x)))));
+    if (ah.readme) out.push(h('div', { class: 'small' }, 'The same steps are in ' + ah.readme + ' (in the manager\'s folder).'));
+    return h('div', { class: 'ahint' }, out);
+  }
+  function showAccelHint() {
+    const ah = STATE && STATE.accelHint;
+    if (!ah) return;
+    openModal({ title: 'Turn on hardware acceleration', wide: true, content: accelHintNodes(ah), submitLabel: null, cancelLabel: 'Close' });
   }
 
   // ===========================================================================
@@ -1112,8 +1155,8 @@
     if (key !== limitsKey) {
       limitsKey = key;
       for (const id of ['#nwMem', '#sMem']) { const el = $(id); el.min = L.minMem; el.max = L.maxMem; }
-      // a microVM needs far less than a VM (nginx: 224 MB); blank = computed
-      for (const id of ['#qMem', '#csMem']) { const el = $(id); el.min = MICROVM_MIN_MEM; el.max = L.maxMem; }
+      // a microVM needs far less than a VM; blank = the engine's default
+      for (const id of ['#qMem', '#csMem']) $(id).max = L.maxMem;
       for (const id of ['#nwCpu', '#qCpu', '#sCpu', '#csCpu']) { const el = $(id); el.min = 1; el.max = L.maxCpus; }
       $('#dkSize').min = L.minDiskGB;
       $('#dkSize').max = L.maxDiskGB;
@@ -1122,8 +1165,49 @@
     setDefault($('#nwCpu'), L.defaultCpus);
     setDefaultCheck($('#qLan'), defaultLan());
     setDefaultCheck($('#dpLan'), defaultLan());
+    // the run form starts on the global default root filesystem
+    const before = $('#qRootfs').value;
+    setDefault($('#qRootfs'), mvDefaults().rootfs);
+    if ($('#qRootfs').value !== before) onRootfsChange();
+    syncMemMin();
+    // the disk-root default follows the settings (light profile: 112 MB)
+    if ($('#qRootfs').value !== 'ram') $('#qMem').placeholder = 'automatic: ' + mvDefaults().memMB + ' MB';
+    $('#csMem').placeholder = $('#csRootfs').value === 'ram' ? 'automatic (sized to the image)' : 'automatic: ' + mvDefaults().memMB + ' MB';
   }
-  const MICROVM_MIN_MEM = 128; // the engine's own lower bound (lib/microvm/validate.js)
+  // Container defaults: the engine's (/api/state microvm.defaults), else the
+  // global settings, else the built-in ones. A disk-root container boots at
+  // 96 MB (the engine's lower bound, lib/microvm/validate.js); a RAM root
+  // needs at least 128 because the whole image sits in its memory.
+  function mvDefaults() {
+    const d = (STATE && STATE.microvm && STATE.microvm.defaults) || {};
+    const s = (STATE && STATE.settings) || {};
+    return {
+      rootfs: d.rootfs === 'ram' || d.rootfs === 'disk' ? d.rootfs : (s.microvmRootfs === 'ram' ? 'ram' : 'disk'),
+      memMB: Number.isInteger(d.memMB) ? d.memMB : (Number.isInteger(s.microvmMemMB) ? s.microvmMemMB : 128),
+      minMemMB: Number.isInteger(d.minMemMB) ? d.minMemMB : 96,
+      ramMinMemMB: Number.isInteger(d.ramMinMemMB) ? d.ramMinMemMB : 128,
+    };
+  }
+  const minMemFor = (rootfs) => (rootfs === 'ram' ? mvDefaults().ramMinMemMB : mvDefaults().minMemMB);
+  function syncMemMin() {
+    $('#qMem').min = minMemFor($('#qRootfs').value);
+    $('#csMem').min = minMemFor($('#csRootfs').value);
+  }
+  // what the Root filesystem choice means, under the select (spec 9)
+  const ROOTFS_WHY = {
+    disk: 'Disk: the image is written once to a read-only disk that every container of it shares; this container gets its own small '
+      + 'writable layer on top. It needs about 128 MB of RAM whatever the image size and starts as fast or faster. Files it changes outside '
+      + 'volumes are kept across restarts until you remove it (or start it fresh).',
+    ram: 'RAM: the whole image is unpacked into the container\'s memory at every start (about 2 x the image + 90 MB of RAM, so big images '
+      + 'are refused or sent to Docker-in-VM) and every start begins from the clean image. Only for special cases; Disk is lighter.',
+  };
+  // the memory field's hint per root filesystem (SPEC-diskroot 16, cov-4): a
+  // disk root that is too small slows to a crawl rather than failing
+  function memWhy(rootfs) {
+    if (rootfs === 'ram') return 'Memory: blank = sized to the image, which is held in RAM (at least ' + mvDefaults().ramMinMemMB + ' MB).';
+    return 'Memory: blank = ' + mvDefaults().memMB + ' MB, or more for apps known to need it (PostgreSQL 256 MB; MySQL, MariaDB, MongoDB and Java apps 512 MB; Elasticsearch 1 GB). '
+      + 'Below 128 MB only for small apps: a container that is too small slows to a crawl instead of failing. Databases and Java apps want 512 MB or more.';
+  }
   function checkMemCpu(mem, cpus) {
     const L = limits();
     if (mem !== undefined && (mem === null || mem < L.minMem || mem > L.maxMem)) return 'Memory must be a number from ' + L.minMem + ' to ' + L.maxMem + ' MB.';
@@ -2690,7 +2774,7 @@
     { key: 'uptime-kuma', label: 'Uptime Kuma (service monitor)', image: 'louislam/uptime-kuma:1', container: 'uptime-kuma',
       ports: '3001:3001', volumes: '/opt/uptime-kuma:/app/data',
       run: { engine: 'auto', ports: [[3001, 3001]], volumes: [['uptime-kuma-data', '/app/data']],
-        note: 'A large image: Automatic may run it with Docker inside a VM instead, and says why.' } },
+        note: 'A larger Node.js app. It runs from its image disk, so the image size does not decide its memory; if it starts slowly, give it 256 MB under Options > Memory.' } },
     { key: 'redis', label: 'Redis', image: 'redis:7-alpine', container: 'redis', ports: '6379:6379',
       run: { engine: 'microvm', ports: [[6379, 6379]] } },
     { key: 'postgres', label: 'PostgreSQL', image: 'postgres:16-alpine', container: 'postgres', ports: '5432:5432',
@@ -2714,6 +2798,11 @@
     $('#qEngine').value = r.engine || 'auto';
     $('#qPriv').checked = !!r.privileged;
     $('#qHostNet').checked = !!r.hostNetwork;
+    // the root filesystem goes back to the default (disk) unless the preset
+    // names one: an earlier RAM choice must not ride along hidden (cov-3)
+    delete $('#qRootfs').dataset.touched;
+    $('#qRootfs').value = r.rootfs === 'ram' || r.rootfs === 'disk' ? r.rootfs : mvDefaults().rootfs;
+    onRootfsChange();
     RUN.ports.set((r.ports || []).map((x) => ({ host: x[0], guest: x[1], proto: 'tcp', lan: defaultLan() })));
     RUN.env.set((r.env || []).map((x) => ({ name: x[0], value: x[1] })));
     RUN.vols.set((r.volumes || []).map((x) => ({ src: x[0], target: x[1], ro: false, copy: false })));
@@ -2721,7 +2810,7 @@
     // switches a preset turns on are shown, never set invisibly
     const extra = [r.privileged ? 'privileged' : null, r.hostNetwork ? 'host network' : null].filter(Boolean);
     $('#qMore').open = true;
-    if (extra.length || r.engine === 'docker-vm') $('#qAdv').open = true;
+    if (extra.length || r.engine === 'docker-vm' || $('#qRootfs').value !== 'disk') $('#qAdv').open = true;
     setChildren($('#qInfo'), [r.note || p.note, extra.length ? 'This preset turns on: ' + extra.join(', ') + '.' : null].filter(Boolean).join(' '));
   }
 
@@ -2861,7 +2950,7 @@
           copy.disabled = !host;
           if (!host && copy.checked) { copy.checked = false; r.copy = false; }
           let t = volKind(r.src, ed.mode);
-          if (host) t += r.copy ? ' - copied into the container once at start (changes are not written back)' : ' - shared live, both ways';
+          if (host) t += r.copy ? ' - copied over the container\'s files at every start (nothing is written back; a file deleted here is not deleted there)' : ' - shared live, both ways';
           setText(kind, t ? 'Row ' + n + ': ' + t : '');
         };
         copy.addEventListener('change', () => { r.copy = copy.checked; sync(); });
@@ -2988,13 +3077,23 @@
     const e = runEngine();
     const vm = e.effective === 'docker-vm';
     $('#qVmOpts').hidden = !vm;
+    // a full VM with Docker has its own disk: the root filesystem choice is microVM-only
+    $('#qMvOpts').hidden = vm;
     if (RUN.vols.mode !== (vm ? 'vm' : 'microvm')) { RUN.vols.mode = vm ? 'vm' : 'microvm'; RUN.vols.render(); }
     setText($('#qVolHint'), vm
       ? 'Each row is a folder inside the VM (e.g. /opt/app/data, created for you) or a Docker volume name. To use a folder on this PC, run the image with a microVM, or add it to the VM\'s Shared folders later.'
-      : 'Each row is a named volume (storage the manager keeps, e.g. pgdata) or a folder on this PC (Browse...). A folder is shared live, both ways, while the container runs; tick "copy" to copy it in once at start instead (quicker for huge folders; nothing is written back).');
+      : 'Each row is a named volume (storage the manager keeps, e.g. pgdata) or a folder on this PC (Browse...). A folder is shared live, both ways, while the container runs; tick "copy" to copy it in at every start instead (quicker for huge folders; it is copied over the container\'s files, nothing is written back, and a file you delete here stays in the container until it is removed or started fresh).');
     setText($('#qVolCaveat'), vm ? '' : 'Folders on this PC: ' + SHARE_CAVEAT + ' ' + SHARE_ACCESS);
     setText($('#qGo'), vm ? 'Create VM and deploy' : 'Run');
     renderRunEngine();
+  }
+  // Root filesystem of the run form: the why, the memory floor and the
+  // memory placeholder follow the choice
+  function onRootfsChange() {
+    setText($('#qRootfsHint'), ROOTFS_WHY[$('#qRootfs').value === 'ram' ? 'ram' : 'disk']);
+    setText($('#qMemHint'), memWhy($('#qRootfs').value));
+    syncMemMin();
+    memHintSoon();
   }
   // The result under the Run form describes a container at one moment. Once
   // that container stops or is removed from somewhere else (its row, Manage,
@@ -3045,8 +3144,13 @@
     const memRaw = $('#qMem').value.trim(), cpuRaw = $('#qCpu').value.trim();
     out.mem = memRaw ? toInt(memRaw) : undefined;
     out.cpus = cpuRaw ? toInt(cpuRaw) : undefined;
-    const minMem = vm ? L.minMem : MICROVM_MIN_MEM;
-    if (out.mem !== undefined && (out.mem === null || out.mem < minMem || out.mem > L.maxMem)) return { error: 'Memory must be a number from ' + minMem + ' to ' + L.maxMem + ' MB, or blank for automatic.', focus: $('#qMem') };
+    // microVM only; sent as chosen, so the run does not depend on when the
+    // global default changes
+    if (!vm) out.rootfs = $('#qRootfs').value === 'ram' ? 'ram' : 'disk';
+    const minMem = vm ? L.minMem : minMemFor(out.rootfs);
+    if (out.mem !== undefined && (out.mem === null || out.mem < minMem || out.mem > L.maxMem)) {
+      return { error: 'Memory must be a number from ' + minMem + ' to ' + L.maxMem + ' MB' + (vm ? '' : (out.rootfs === 'ram' ? ' for a RAM root' : ' for a disk root')) + ', or blank for automatic.', focus: $('#qMem') };
+    }
     if (out.cpus !== undefined && (out.cpus === null || out.cpus < 1 || out.cpus > L.maxCpus)) return { error: 'vCPUs must be a number from 1 to ' + L.maxCpus + ', or blank.', focus: $('#qCpu') };
     const p = RUN.ports.read();
     if (p.error) return { error: p.error };
@@ -3098,6 +3202,7 @@
     if (f.name) body.name = f.name;
     if (f.mem !== undefined) body.mem = f.mem;
     if (f.cpus !== undefined) body.cpus = f.cpus;
+    if (f.rootfs) body.rootfs = f.rootfs;
     // no rows: the manager publishes the ports the image declares
     if (f.ports.length) body.ports = f.ports;
     if (f.env.length) body.env = f.env;
@@ -3317,11 +3422,19 @@
   }
   function ctrTags(c) {
     const out = [];
+    // the root filesystem (only from a manager that reports it)
+    if (c.rootfs === 'disk') {
+      out.push(h('span', { class: 'tag', title: 'Disk root: the image stays on a shared read-only disk; files the container changes are kept until it is removed'
+        + (Number.isFinite(c.rootDiskBytes) ? ' (writable layer ' + fmtBytes(c.rootDiskBytes) + ')' : '') }, 'Disk'));
+    } else if (c.rootfs === 'ram') {
+      out.push(h('span', { class: 'tag', title: 'RAM root: the whole image is held in memory and resets at every start' }, 'RAM'));
+    }
     if (c.ephemeral) out.push(h('span', { class: 'tag temp', title: 'Removed by "Delete all temporary containers"' }, 'temporary'));
     if (/^(mcp|claude)/.test(c.createdBy || '')) out.push(h('span', { class: 'tag claude', title: 'Started by Claude through the MCP server' }, 'Claude'));
     if (c.autostart) out.push(h('span', { class: 'tag', title: 'Starts with the manager' }, 'autostart'));
     if (c.pendingRestart) out.push(h('span', { class: 'tag warn', title: 'Changed settings apply on the next start' }, 'restart pending'));
     if (c.lost) out.push(h('span', { class: 'tag err', title: 'Its QEMU still runs but its details were lost - Stop ends it' }, 'record lost'));
+    if (c.paused) out.push(h('span', { class: 'tag err', title: errText(c.paused) }, 'paused: disk full'));
     if (c.fallback) out.push(h('span', { class: 'tag warn', title: errText(c.fallback.reason) || 'Docker inside a VM is suggested for this image' }, 'try Docker-in-VM'));
     return out;
   }
@@ -3385,7 +3498,7 @@
     r.tr.classList.toggle('sel', sel);
     if (sel) r.tr.setAttribute('aria-current', 'true'); else r.tr.removeAttribute('aria-current');
     setText(r.name, c.name || c.id);
-    const tagKey = [c.ephemeral, c.createdBy, c.autostart, !!c.fallback, c.pendingRestart, c.lost].join('|');
+    const tagKey = [c.ephemeral, c.createdBy, c.autostart, !!c.fallback, c.pendingRestart, c.lost, c.rootfs, c.rootDiskBytes, c.paused].join('|');
     if (r.tagKey !== tagKey) { r.tagKey = tagKey; setChildren(r.tags, ctrTags(c)); }
     setText(r.image, c.image || '');
     const pillKey = [c.status, c.exitCode, !!c.busy, c.exitReason, errText(c.lastError)].join('|');
@@ -3641,7 +3754,7 @@
     if (!CTRD.id) return;
     const c = CTRS.get(CTRD.id);
     if (!c) { closeCtrDetail(); return; } // removed (here or elsewhere)
-    const titleKey = JSON.stringify([c.name, c.status, c.exitCode, !!c.busy, c.ephemeral, c.createdBy, c.autostart, !!c.fallback, c.pendingRestart, c.lost]);
+    const titleKey = JSON.stringify([c.name, c.status, c.exitCode, !!c.busy, c.ephemeral, c.createdBy, c.autostart, !!c.fallback, c.pendingRestart, c.lost, c.rootfs, c.rootDiskBytes, c.paused]);
     if ($('#cdTitle').dataset.key !== titleKey) {
       $('#cdTitle').dataset.key = titleKey;
       setChildren($('#cdTitle'), c.name || c.id, h('span', { class: 'mono' }, c.id));
@@ -3712,7 +3825,7 @@
       }
       const cin = Array.isArray(rec.copyIn) ? rec.copyIn : [];
       if (cin.length) {
-        kv('Copied in at start', kvList(cin.filter((x) => x && typeof x === 'object').map((x) => [h('span', { class: 'mono' }, x.hostDir || x.hostPath || ''), ' → ',
+        kv('Copied in at every start', kvList(cin.filter((x) => x && typeof x === 'object').map((x) => [h('span', { class: 'mono' }, x.hostDir || x.hostPath || ''), ' → ',
           h('span', { class: 'mono' }, x.target || x.guestPath || '')])));
       }
       const envNames = (Array.isArray(rec.env) ? rec.env : []).map((e) => String(e).split('=')[0]).filter(Boolean);
@@ -3722,8 +3835,10 @@
       if (rec.entrypoint || rec.cmd) kv('Command', h('span', { class: 'mono breakall' }, [argv(rec.entrypoint), argv(rec.cmd)].filter((x) => x !== null && x !== '').join(' ') || '(empty)'));
       if (rec.user || rec.workdir) kv('User / folder', h('span', { class: 'mono' }, (rec.user || 'image default') + '  ·  ' + (rec.workdir || 'image default')));
       const rt = rec.runtime && typeof rec.runtime === 'object' ? rec.runtime : null;
+      const rfs = ctrRootfs(c, rec);
       kv('Memory / vCPUs', (rt && rt.memMB ? rt.memMB : (Number.isFinite(c.mem) ? c.mem : (rec.mem || 'automatic'))) + ' MB / ' + ((rt && rt.cpus) || rec.cpus || 1) + ' vCPU'
-        + (rec.mem ? '' : ' (memory sized to the image)'));
+        + (rec.mem ? '' : (rfs === 'ram' ? ' (memory sized to the image)' : (rfs === 'disk' ? ' (the default for disk-root containers)' : ''))));
+      if (rfs) kv('Root filesystem', rootfsNodes(c, rec, rfs));
       if (rt && (rt.effectiveAccel || rt.accel)) {
         const acc = rt.effectiveAccel || rt.accel;
         kv('Acceleration', [h('b', null, accelName(acc)), acc === 'tcg' ? ' - software emulation: slower, and not a security boundary' : ' - hardware accelerated',
@@ -3735,7 +3850,8 @@
       if (rec.createdAt) kv('Created', fmtDate(rec.createdAt) + (rec.createdBy ? ' by ' + (/^(mcp|claude)/.test(rec.createdBy) ? 'Claude' : rec.createdBy) : ''));
       const tm = rec.timings && typeof rec.timings === 'object' ? rec.timings : null;
       if (tm) {
-        const parts = [['pull', tm.pullMs], ['unpack', tm.flattenMs], ['initrd', tm.initrdMs], ['ready', tm.readyMs], ['first answer', tm.firstResponseMs]]
+        const parts = [['pull', tm.pullMs], ['unpack', tm.flattenMs], ['image disk', tm.diskMs], ['initrd', tm.initrdMs], ['root mounted', tm.rootMs],
+          ['ready', tm.readyMs], ['first answer', tm.firstResponseMs]]
           .filter((x) => Number.isFinite(x[1])).map((x) => x[0] + ' ' + fmtMs(x[1]));
         if (parts.length) kv('Timings', h('span', { class: 'mono' }, parts.join('  ·  ')));
       }
@@ -3757,12 +3873,49 @@
         setText($('#cdErrDetail'), msgs.join('\n'));
       }
       setText($('#cdHint'), ctrLive(c) ? 'Stop lets the app finish (it gets the stop signal, then a kill after the timeout); volumes are always written out before the VM ends.'
-        : 'Start boots it again with the same settings. Files changed outside volumes and shared folders are reset: the container\'s root filesystem lives in memory.');
+        : (rfs === 'disk' ? 'Start boots it again; files changed outside volumes are kept until you remove it or start it fresh.'
+          : 'Start boots it again with the same settings. Files changed outside volumes and shared folders are reset: the container\'s root filesystem lives in memory.'));
     }
     if (CTRD.upEl) {
       setText(CTRD.upEl, c.status === 'running' && c.startedAt ? fmtDur(secondsSince(c.startedAt))
         : (!ctrLive(c) && (c.endedAt || rec.endedAt) ? 'ended ' + ago(c.endedAt || rec.endedAt) + (Number.isInteger(c.exitCode) ? ', exit code ' + c.exitCode : '') : '-'));
     }
+  }
+  // The root filesystem a container runs with (while it runs) or is set to,
+  // or null from a manager that does not report one.
+  function ctrRootfs(c, rec) {
+    const rt = rec && rec.runtime && typeof rec.runtime === 'object' ? rec.runtime : null;
+    const v = (ctrLive(c) && rt && rt.rootfs) || (rec && rec.rootfs) || c.rootfs || null;
+    return v === 'disk' || v === 'ram' ? v : null;
+  }
+  // its writable layer on this PC (disk root), in bytes, or null
+  function layerBytes(c, rec) {
+    if (Number.isFinite(c.rootDiskBytes)) return c.rootDiskBytes;
+    const d = rec && rec.rootDisk && typeof rec.rootDisk === 'object' ? rec.rootDisk : null;
+    return d && Number.isFinite(d.overlayBytes) ? d.overlayBytes : null;
+  }
+  function rootfsNodes(c, rec, rfs) {
+    const out = [];
+    if (rfs === 'disk') {
+      const b = layerBytes(c, rec);
+      out.push(h('b', null, 'Disk'), ' - the image stays on a shared read-only disk; ',
+        b !== null ? 'writable layer ' + fmtBytes(b) + ', kept until the container is removed' : 'its writable layer is made at its first start');
+    } else {
+      out.push(h('b', null, 'RAM'), ' - the whole image is held in memory and resets at every start');
+    }
+    // switched in Settings while it runs: applies at the next start
+    const want = rec && (rec.rootfs === 'disk' || rec.rootfs === 'ram') ? rec.rootfs : null;
+    if (want && want !== rfs) {
+      out.push(h('div', { class: 'small' }, 'Becomes ' + (want === 'ram' ? 'RAM' : 'Disk') + ' at the next start'
+        + (want === 'ram' ? ' - the writable layer is dropped then' : '') + '.'));
+    }
+    return out;
+  }
+  // Disk root, stopped: boot it from the clean image again (spec 6.2 fresh)
+  async function startFresh(b, c) {
+    if (!await confirmDialog('Start "' + (c.name || c.id) + '" fresh?',
+      'Drops every change outside volumes and shared folders, like removing and re-running it. The image is looked up again.', 'Start fresh')) return;
+    runTask('/api/container/start', { id: c.id, fresh: true }, { btn: b });
   }
   // Docker-compatible exit codes (microVM spec 6.3)
   const EXIT_MEANING = {
@@ -3787,6 +3940,7 @@
       }
     } else {
       out.push(btn('Start', 'sm primary', { fk: 'cd-start', disabled: busy, onClick: (b) => startCtr(b, c) }));
+      if (ctrRootfs(c, CTRD.rec) === 'disk') out.push(btn('Start fresh', 'sm', { fk: 'cd-fresh', disabled: busy, aria: 'Start ' + n + ' fresh, dropping its changed files', onClick: (b) => startFresh(b, c) }));
     }
     out.push(btn('Logs', 'sm', { fk: 'cd-logs', onClick: () => showCtab('logs') }));
     out.push(btn('Remove', 'sm danger-outline', { fk: 'cd-rm', disabled: stopping, onClick: (b) => removeCtr(b, c) }));
@@ -3959,14 +4113,19 @@
     for (const id of ['#csName', '#csNote', '#csMem', '#csCpu']) $(id).value = '';
     $('#csAuto').checked = false;
     $('#csRm').checked = false;
+    $('#csRootfs').value = 'disk';
+    setText($('#csRootfsHint'), '');
     if (CS.ports) CS.ports.set([]);
   }
   function csSource() {
     const c = CTRS.get(CTRD.id);
     if (!c) return null;
     const rec = CTRD.rec || {};
+    const rfs = rec.rootfs || c.rootfs;
     return {
       name: rec.name || c.name || '', note: rec.note || '', mem: Number.isInteger(rec.mem) ? rec.mem : null,
+      // null: a manager that has no root filesystem choice (the select is hidden)
+      rootfs: rfs === 'disk' || rfs === 'ram' ? rfs : null,
       cpus: Number.isInteger(rec.cpus) ? rec.cpus : null, autostart: !!(rec.autostart !== undefined ? rec.autostart : c.autostart),
       // an edit made while it runs is what the next start publishes
       autoRemove: !!rec.autoRemove, ports: (rec.pendingPorts || c.pendingPorts || rec.ports || c.ports || []).map((p) => ({ host: p.host, guest: p.guest, proto: p.proto === 'udp' ? 'udp' : 'tcp', lan: !!p.lan })),
@@ -3986,8 +4145,24 @@
     $('#csCpu').value = s.cpus === null ? '' : String(s.cpus);
     $('#csAuto').checked = s.autostart;
     $('#csRm').checked = s.autoRemove;
+    $('#csRootfs').value = s.rootfs || 'disk';
+    $('#csRootfs').parentElement.hidden = !s.rootfs;
+    csRootfsHint();
     CS.ports.set(s.ports);
     $('#csUndo').disabled = true;
+  }
+  // what switching the root filesystem does (applies at the next start)
+  function csRootfsHint() {
+    const o = CS.orig;
+    const v = $('#csRootfs').value;
+    let t = '';
+    if (o && o.rootfs && v !== o.rootfs) {
+      t = v === 'ram' ? 'At the next start the container switches to a RAM root: its writable layer (files changed outside volumes) is dropped, and from then on it resets at every start.'
+        : 'At the next start the container switches to a disk root: it gets a writable layer on the image disk, and its files are kept from then on until it is removed.';
+    } else if (o && o.rootfs) t = ROOTFS_WHY[v === 'ram' ? 'ram' : 'disk'];
+    setText($('#csRootfsHint'), t);
+    setText($('#csMemHint'), o && o.rootfs ? memWhy(v) : '');
+    syncMemMin();
   }
   function csDirty() { CS.dirty = true; $('#csUndo').disabled = false; }
   async function csSave(b) {
@@ -4005,7 +4180,12 @@
     if (note !== o.note) body.note = note;
     const memRaw = $('#csMem').value.trim(), cpuRaw = $('#csCpu').value.trim();
     const mem = memRaw ? toInt(memRaw) : null, cpus = cpuRaw ? toInt(cpuRaw) : null;
-    if (memRaw && (mem === null || mem < MICROVM_MIN_MEM || mem > L.maxMem)) return showErr(err, 'Memory must be a number from ' + MICROVM_MIN_MEM + ' to ' + L.maxMem + ' MB, or blank for automatic.', $('#csMem'));
+    const rootfs = o.rootfs ? ($('#csRootfs').value === 'ram' ? 'ram' : 'disk') : null;
+    const minMem = minMemFor(rootfs || 'ram');
+    if (memRaw && (mem === null || mem < minMem || mem > L.maxMem)) {
+      return showErr(err, 'Memory must be a number from ' + minMem + ' to ' + L.maxMem + ' MB' + (rootfs ? (rootfs === 'ram' ? ' for a RAM root' : ' for a disk root') : '') + ', or blank for automatic.', $('#csMem'));
+    }
+    if (rootfs && rootfs !== o.rootfs) body.rootfs = rootfs;
     if (cpuRaw && (cpus === null || cpus < 1 || cpus > L.maxCpus)) return showErr(err, 'vCPUs must be a number from 1 to ' + L.maxCpus + ', or blank.', $('#csCpu'));
     if (mem !== o.mem) body.mem = mem;
     if (cpus !== o.cpus) body.cpus = cpus;
@@ -4017,13 +4197,18 @@
     if (JSON.stringify(p.ports) !== JSON.stringify(o.ports)) body.ports = p.ports;
     if (Object.keys(body).length === 1) { hideErr(err); toast('Nothing to save - no setting was changed', 'ok'); return; }
     hideErr(err);
+    // disk -> RAM drops the writable layer at the next start: say so first
+    if (body.rootfs === 'ram' && !await confirmDialog('Switch "' + (o.name || id) + '" to a RAM root?',
+      'At its next start the container\'s writable layer is deleted: every file it changed outside volumes and shared folders is lost, '
+      + 'and from then on it resets at every start. It also needs more memory (about 2 x the image + 90 MB).', 'Switch to RAM')) return;
+    if (id !== CTRD.id) return;
     const undo = busyButton(b);
     try {
       const r = await post('/api/container/settings', body);
       if (id !== CTRD.id) return;
       CS.dirty = false;
       const c = CTRS.get(id);
-      setChildren($('#csStatus'), r.pendingRestart || (c && ctrLive(c)) ? 'Saved - memory, vCPUs and ports apply the next time the container starts.' : 'Saved.',
+      setChildren($('#csStatus'), r.pendingRestart || (c && ctrLive(c)) ? 'Saved - memory, vCPUs, ports and the root filesystem apply the next time the container starts.' : 'Saved.',
         (Array.isArray(r.warnings) ? r.warnings : []).map((w) => h('div', null, 'Note: ' + w)));
       toast('Container settings saved', 'ok');
       await ctrdFetch(true);
@@ -4036,13 +4221,15 @@
     }
   }
 
-  // ---- the Memory field shows the computed default (spec 12.2) ----
-  // plan.recommendedMemMB, as the manager computes it: the image lives in
-  // RAM - 2 x image + 90 MB while booting, image + 176 MB running - and a
-  // microVM gets at least 256 MB
+  // ---- the Memory field shows the default (spec 12.2, SPEC-diskroot 7) ----
+  // Disk root: the engine's fixed default (128 MB, 112 with the light
+  // profile) whatever the image. RAM root: plan.recommendedMemMB, as the
+  // manager computes it - the image lives in RAM: 2.2 x image + 90 MB while
+  // booting (2 x was measured too little for a 600 MB image), image + 176 MB
+  // running - and at least 256 MB
   function recommendedMemMB(bytes) {
     const mib = bytes / 1048576;
-    return Math.max(256, Math.ceil(Math.max(2 * mib + 90, mib + 48 + 128, 128) / 16) * 16);
+    return Math.max(256, Math.ceil(Math.max(2.2 * mib + 90, mib + 48 + 128, 128) / 16) * 16);
   }
   // "nginx:alpine" -> "docker.io/library/nginx:alpine" (how /api/images
   // names references)
@@ -4063,6 +4250,8 @@
   const MEMHINT = { data: null, at: 0, busy: false, timer: null };
   async function memHint() {
     const el = $('#qMem');
+    // a disk root does not size its memory to the image
+    if ($('#qRootfs').value !== 'ram') { el.placeholder = 'automatic: ' + mvDefaults().memMB + ' MB'; return; }
     const img = $('#qImg').value.trim();
     if (!img) { el.placeholder = 'automatic'; return; }
     if (!MEMHINT.data || Date.now() - MEMHINT.at > 30000) {
@@ -4073,7 +4262,7 @@
         MEMHINT.at = Date.now();
       } catch (e) { MEMHINT.data = null; } finally { MEMHINT.busy = false; }
     }
-    if ($('#qImg').value.trim() !== img) return; // typed on meanwhile: the next call decides
+    if ($('#qImg').value.trim() !== img || $('#qRootfs').value !== 'ram') return; // changed meanwhile: the next call decides
     const want = canonRef(img);
     const list = MEMHINT.data && Array.isArray(MEMHINT.data.images) ? MEMHINT.data.images : [];
     const row = list.find((x) => Array.isArray(x.references) && x.references.indexOf(want) !== -1);
@@ -4121,7 +4310,7 @@
     const box = $('#imgList');
     const j = IMG.data || {};
     const list = Array.isArray(j.images) ? j.images : [];
-    const key = JSON.stringify([list, j.rateLimit, j.cacheBytes, IMG.na, IMG.err, Array.from(CTRS.keys())]);
+    const key = JSON.stringify([list, j.rateLimit, j.cacheBytes, IMG.na, IMG.err, Array.from(CTRS.keys()), STATE && STATE.settings && STATE.settings.imagePruneDays]);
     if (key === IMG.key) return;
     IMG.key = key;
     $('#imgPrune').disabled = IMG.na;
@@ -4129,14 +4318,22 @@
     if (IMG.na) { setText($('#imgStatus'), ''); setChildren(box, h('div', { class: 'empty' }, 'The image cache is not available in this version of the manager yet.')); return; }
     if (IMG.err) { setChildren(box, h('div', { class: 'empty' }, 'Could not read the images: ' + IMG.err)); return; }
     const rl = j.rateLimit && typeof j.rateLimit === 'object' ? j.rateLimit : null;
+    const pruneDays = STATE && STATE.settings && Number.isInteger(STATE.settings.imagePruneDays) ? STATE.settings.imagePruneDays : 0;
     setText($('#imgStatus'), [Number.isFinite(j.cacheBytes) ? 'Cache: ' + fmtBytes(j.cacheBytes) : null,
       rl && Number.isFinite(rl.remaining) ? 'Docker Hub pulls left: ' + rl.remaining + (Number.isFinite(rl.limit) ? ' of ' + rl.limit : '')
-        + (Number.isFinite(rl.window) ? ' per ' + fmtDur(rl.window) : '') + (rl.at ? ' (as of ' + ago(rl.at) + ')' : '') : null].filter(Boolean).join(' · '));
+        + (Number.isFinite(rl.window) ? ' per ' + fmtDur(rl.window) : '') + (rl.at ? ' (as of ' + ago(rl.at) + ')' : '') : null,
+      pruneDays ? 'Images unused for ' + pruneDays + ' days are pruned automatically' : null].filter(Boolean).join(' · '));
     if (!list.length) { setChildren(box, h('div', { class: 'empty' }, 'No images yet - they are downloaded the first time you run them, or pull one below.')); return; }
     keepFocusIn(box, () => setChildren(box, h('div', { class: 'tablewrap' }, h('table', null,
-      h('thead', null, h('tr', null, ['Image', 'Download / unpacked', 'Last used', 'Used by', 'Engine'].map((x) => h('th', { scope: 'col' }, x)),
+      h('thead', null, h('tr', null, ['Image', 'Download / unpacked / disk', 'Last used', 'Used by', 'Engine'].map((x) => h('th', { scope: 'col' }, x)),
         h('th', { scope: 'col' }, h('span', { class: 'sr-only' }, 'Actions')))),
       h('tbody', null, list.map((im, i) => imageRow(im, i)))))));
+  }
+  // the unpacked size: a RAM-root image has its rootfs archive size, a
+  // disk-root one (the default) only its unpacked size (cov-1)
+  function unpackedOf(im) {
+    if (Number.isFinite(im.rootfsBytes)) return im.rootfsBytes;
+    return Number.isFinite(im.unpackedBytes) ? im.unpackedBytes : null;
   }
   function imageRow(im, i) {
     const refs = (Array.isArray(im.references) ? im.references : []).map(String);
@@ -4150,7 +4347,9 @@
         im.configDigest ? h('div', { class: 'small mono', title: im.configDigest }, String(im.configDigest).slice(0, 19) + '...') : null,
         warns.length ? h('div', { class: 'small', title: warns.join('\n') }, warns.length + ' warning' + (warns.length === 1 ? '' : 's') + ' when unpacked') : null,
         im.complete === false ? h('span', { class: 'tag warn', title: 'Some layers are not downloaded - Pull latest fetches them' }, 'incomplete') : null),
-      h('td', { class: 'mono' }, fmtBytes(im.compressedBytes) + ' / ' + fmtBytes(im.rootfsBytes)),
+      // disk: the read-only image disk its disk-root containers share ("-" until one ran)
+      h('td', { class: 'mono', title: 'download / unpacked / image disk (shared by its disk-root containers)' },
+        fmtBytes(im.compressedBytes) + ' / ' + fmtBytes(unpackedOf(im)) + ' / ' + fmtBytes(Number.isFinite(im.diskBytes) ? im.diskBytes : null)),
       h('td', { class: 'mono' }, im.lastUsed ? ago(im.lastUsed) : (im.pulledAt ? 'never (pulled ' + ago(im.pulledAt) + ')' : 'never')),
       h('td', null, used.length ? used.join(', ') : h('span', { class: 'small' }, '-')),
       h('td', null, !compat ? '-' : (compat.engine === 'docker-vm'
@@ -4164,7 +4363,8 @@
     const what = ref || String(im.configDigest || '').slice(0, 19);
     if (!await confirmDialog('Remove the image "' + what + '"?',
       'Its files are deleted from the cache; running it again downloads it again.'
-      + (used.length ? '\n\nIt is used by: ' + used.join(', ') + '. Those containers need it again to start.' : ''), 'Remove image')) return;
+      + (used.length ? '\n\nIt is used by: ' + used.join(', ') + '. A container that already has its own writable layer keeps the image disk it '
+        + 'needs until that container is removed; the others download the image again when they start.' : ''), 'Remove image')) return;
     const body = im.configDigest ? { configDigest: im.configDigest } : { image: ref };
     const undo = busyButton(b);
     try {
@@ -4173,7 +4373,8 @@
       } catch (e) {
         if (e.code !== 'IMAGE_IN_USE') throw e;
         undo();
-        if (!await confirmDialog('The image is still used', e.message + '\n\nRemove it anyway? The containers that use it keep their records, and download it again when they start.', 'Remove anyway')) return;
+        if (!await confirmDialog('The image is still used', e.message + '\n\nRemove it anyway? The containers that use it keep their records; '
+          + 'one with a writable layer keeps its image disk until it is removed, the others download the image again when they start.', 'Remove anyway')) return;
         await post('/api/image/remove', Object.assign({ force: true }, body));
       }
       toast('Removed ' + what, 'ok');
@@ -4306,12 +4507,17 @@
       h('label', { class: 'chk' }, h('input', { type: 'radio', name: 'defaultExpose', value: 'lan', checked: lan }), 'Other devices on my network too (LAN)'));
     const dataRoot = h('input', { id: 'gData', readonly: true, spellcheck: 'false' });
     dataRoot.value = STATE.dataRoot || (ABOUT && ABOUT.dataRoot) || '';
+    const ah = STATE.accelHint && typeof STATE.accelHint === 'object' ? STATE.accelHint : null;
+    // engine settings (config.json) - only from a manager that reports them
+    const eng = typeof s.lightProfile === 'boolean' ? engineSections(s) : null;
 
     const sections = [
       h('div', { class: 'msec' }, h('h3', null, 'Acceleration'), field('gAccel', 'Accelerator for VMs set to Automatic', accelSel),
         h('div', { class: 'hint' }, a.detecting ? 'Still checking what this PC supports...'
           : 'Detected on this PC: ' + ((a.available || []).map(accelName).join(', ') || 'nothing yet (QEMU is not installed)')
-          + '. Hardware acceleration is much faster; TCG always works. A VM can override this in its Settings tab.')),
+          + '. Hardware acceleration is much faster; TCG always works. A VM can override this in its Settings tab.'),
+        ah ? h('details', { class: 'mt', open: true }, h('summary', null, 'No hardware acceleration - how to turn it on'), accelHintNodes(ah)) : null),
+      eng ? eng.nodes : null,
       h('div', { class: 'msec' }, h('h3', null, 'Port forwards'), radios,
         h('div', { class: 'hint' }, 'Only the default for forwards added from now on. Every forward keeps its own "Reachable from LAN" choice, which you can change any time.')),
       h('div', { class: 'msec' }, h('h3', null, 'Data folder'), field('gData', 'VMs, templates, logs, the SSH key and the access token live in', dataRoot),
@@ -4321,7 +4527,7 @@
     openModal({
       title: 'Settings', wide: true, content: sections, submitLabel: 'Save',
       onSubmit: async (d) => {
-        const body = {};
+        const body = eng ? eng.read(d) : {}; // throws a readable error: the dialog stays open
         if (d.accel && d.accel !== (s.accel || 'auto')) body.accel = d.accel;
         if (d.defaultExpose && d.defaultExpose !== (s.defaultExpose || 'local')) body.defaultExpose = d.defaultExpose;
         if (!Object.keys(body).length) return true;
@@ -4332,6 +4538,110 @@
         return true;
       },
     });
+  }
+  // ---- engine settings and the light profile (SPEC-diskroot 9, 10) ----
+  // They live in the data folder's config.json; a field left blank means "the
+  // profile's default" (an explicit value always beats the profile). The
+  // manager checks every value again; ranges come from it (settings.ranges).
+  const LP_ROWS = [
+    // [config.json key, label, how a value reads]
+    ['microvmMemMB', 'Container memory (disk root)', (v) => v + ' MB'],
+    ['tcgTbSizeMB', 'Translation cache of a container without acceleration (TCG)', (v) => (v ? v + ' MB' : 'QEMU default')],
+    ['vmTcgTbSizeMB', 'Translation cache of a full VM without acceleration (TCG)', (v) => (v ? v + ' MB' : 'QEMU default (1 GB)')],
+    ['vmDefaultMemMB', 'Memory of a new full VM', (v) => v + ' MB'],
+    ['keepAlpineDownload', 'Keep the Alpine download after the base image is built', (v) => (v ? 'kept' : 'deleted (downloaded again to rebuild)')],
+    ['imagePruneDays', 'Remove images no container used for', (v) => (v ? v + ' days' : 'never')],
+  ];
+  const LP_FALLBACK = {
+    normal: { microvmRootfs: 'disk', microvmMemMB: 128, tcgTbSizeMB: 128, vmTcgTbSizeMB: 0, vmDefaultMemMB: 1024, keepAlpineDownload: true, imagePruneDays: 0 },
+    light: { microvmRootfs: 'disk', microvmMemMB: 112, tcgTbSizeMB: 64, vmTcgTbSizeMB: 256, vmDefaultMemMB: 512, keepAlpineDownload: false, imagePruneDays: 7 },
+  };
+  // s: STATE.settings -> {nodes, read(formData) -> request body (throws)}
+  function engineSections(s) {
+    const pd = s.profileDefaults && s.profileDefaults.normal && s.profileDefaults.light ? s.profileDefaults : LP_FALLBACK;
+    const explicit = Array.isArray(s.explicit) ? s.explicit : [];
+    const isSet = (k) => explicit.indexOf(k) !== -1;
+    const ranges = s.ranges && typeof s.ranges === 'object' ? s.ranges : {};
+    const light = h('input', { type: 'checkbox', id: 'gLight', name: 'lightProfile', checked: !!s.lightProfile });
+    const prof = () => (light.checked ? pd.light : pd.normal);
+    // microVM containers: default root filesystem and memory
+    const rootSel = h('select', { id: 'gRootfs', name: 'microvmRootfs' },
+      h('option', { value: 'disk' }, 'Disk - the image stays on disk, about 128 MB of RAM whatever its size (recommended)'),
+      h('option', { value: 'ram' }, 'RAM - the whole image in memory, resets at every start'));
+    rootSel.value = s.microvmRootfs === 'ram' ? 'ram' : 'disk';
+    const num = (k, id) => {
+      const el = h('input', { id: id, name: k, type: 'number', inputmode: 'numeric', step: '1' });
+      if (isSet(k) && Number.isFinite(s[k])) el.value = String(s[k]);
+      const r = ranges[k];
+      if (r) { el.min = r.zeroOr ? 0 : r.min; el.max = r.max; }
+      return el;
+    };
+    const mvMem = num('microvmMemMB', 'gMvMem');
+    // the advanced values, each blank = the profile's default
+    const adv = {
+      tcgTbSizeMB: num('tcgTbSizeMB', 'gTcgTb'), vmTcgTbSizeMB: num('vmTcgTbSizeMB', 'gVmTcgTb'),
+      vmDefaultMemMB: num('vmDefaultMemMB', 'gVmMem'), imagePruneDays: num('imagePruneDays', 'gPrune'),
+    };
+    const keepSel = h('select', { id: 'gKeepAlpine', name: 'keepAlpineDownload' },
+      h('option', { value: '' }, 'the profile\'s default'), h('option', { value: 'true' }, 'keep it'), h('option', { value: 'false' }, 'delete it'));
+    keepSel.value = isSet('keepAlpineDownload') ? String(!!s.keepAlpineDownload) : '';
+    // the table of what the profile changes, refreshed when the box is ticked
+    const tbody = h('tbody');
+    const placeholders = () => {
+      const p = prof();
+      mvMem.placeholder = 'profile default: ' + p.microvmMemMB + ' MB';
+      for (const k of Object.keys(adv)) adv[k].placeholder = 'profile default: ' + (LP_ROWS.find((r) => r[0] === k)[2])(p[k]);
+      setChildren(tbody, LP_ROWS.map((r) => h('tr', null, h('td', null, r[1]), h('td', { class: 'mono' }, r[2](pd.normal[r[0]])), h('td', { class: 'mono' }, r[2](pd.light[r[0]])),
+        h('td', { class: 'mono' }, isSet(r[0]) ? r[2](s[r[0]]) + ' (set by you)' : r[2](p[r[0]])))));
+    };
+    light.addEventListener('change', placeholders);
+    placeholders();
+    const nodes = [
+      h('div', { class: 'msec' }, h('h3', null, 'microVM containers'),
+        h('div', { class: 'grid g-2' }, field('gRootfs', 'Default root filesystem', rootSel), field('gMvMem', 'Default memory of a disk-root container (MB)', mvMem)),
+        h('div', { class: 'hint' }, 'Disk is lighter in every way: the image is written once to a read-only disk shared by its containers, '
+          + 'so a container needs about 128 MB whatever the image size, and its own changes are kept until it is removed. RAM holds the whole '
+          + 'image in memory and resets at every start. A container can pick its own under Run > Advanced. Memory below 128 MB suits small apps only '
+          + '(a container short of memory slows to a crawl). Blank memory = the profile\'s default.')),
+      h('div', { class: 'msec' }, h('h3', null, 'Light profile'),
+        h('label', { class: 'chk' }, light, 'Use the light profile - smaller defaults so the manager fits inside another VM or a small PC'),
+        h('div', { class: 'hint' }, 'It changes defaults only; a value you set yourself below always wins. New VMs and containers get the new '
+          + 'defaults at their next start.'),
+        h('div', { class: 'tablewrap mt' }, h('table', { class: 'lptable' },
+          h('thead', null, h('tr', null, ['Setting', 'Normal', 'Light', 'Now'].map((x) => h('th', { scope: 'col' }, x)))), tbody)),
+        h('details', { class: 'mt' }, h('summary', null, 'Set single values (blank = the profile\'s default)'),
+          h('div', { class: 'grid g-2 mt' },
+            field('gTcgTb', 'Container TCG translation cache (MB, 0 = QEMU default)', adv.tcgTbSizeMB),
+            field('gVmTcgTb', 'Full-VM TCG translation cache (MB, 0 = QEMU default)', adv.vmTcgTbSizeMB),
+            field('gVmMem', 'Memory of a new full VM (MB)', adv.vmDefaultMemMB),
+            field('gPrune', 'Remove unused images after (days, 0 = never)', adv.imagePruneDays),
+            field('gKeepAlpine', 'The Alpine download after the base build', keepSel)),
+          h('div', { class: 'hint' }, 'The translation cache only matters without hardware acceleration: smaller saves memory (64 MB instead of 128 '
+            + 'saves about 84 MB per container) and costs some speed. These are saved in config.json in the data folder.'))),
+    ];
+    function read(d) {
+      const body = {};
+      if (!!d.lightProfile !== !!s.lightProfile) body.lightProfile = !!d.lightProfile;
+      // the default root filesystem: both profiles say disk, so only a
+      // change (or undoing an explicit RAM) is sent
+      if (d.microvmRootfs && d.microvmRootfs !== (s.microvmRootfs || 'disk')) body.microvmRootfs = d.microvmRootfs;
+      for (const r of LP_ROWS) {
+        const k = r[0];
+        if (k === 'keepAlpineDownload') {
+          const v = d[k] === 'true' ? true : (d[k] === 'false' ? false : null);
+          if (v === null) { if (isSet(k)) body[k] = null; } else if (!isSet(k) || v !== s[k]) body[k] = v;
+          continue;
+        }
+        const raw = String(d[k] === undefined ? '' : d[k]).trim();
+        if (!raw) { if (isSet(k)) body[k] = null; continue; }
+        const n = toInt(raw), rg = ranges[k];
+        const ok = n !== null && (!rg || (rg.zeroOr && n === 0) || (n >= rg.min && n <= rg.max));
+        if (!ok) throw new Error(r[1] + ': a whole number' + (rg ? (rg.zeroOr ? ', 0 or ' : ' from ') + rg.min + ' to ' + rg.max : '') + ', or blank for the profile\'s default.');
+        if (!isSet(k) || n !== s[k]) body[k] = n;
+      }
+      return body;
+    }
+    return { nodes: nodes, read: read };
   }
   function mcpSection() {
     const sec = h('div', { class: 'msec' }, h('h3', null, 'Connect Claude (MCP)'),
@@ -4393,6 +4703,7 @@
       if (TAB === 'network') loadNetwork(true);
     });
     onClick('#btnSettings', openSettingsDialog);
+    onClick('#accelHow', showAccelHint);
     onClick('#btnSetup', (b) => ctaClick(b, 'primary'));
     onClick('#btnSetup2', (b) => ctaClick(b, 'secondary'));
     onClick('#btnClearTasks', () => { for (const t of TASKS.recent) TASKS.hidden.add(t.id); renderTasks(); });
@@ -4459,7 +4770,7 @@
     // run a Docker image
     RUN.ports = portEditor($('#qPortRows'), { fk: 'qp', empty: 'No rows - the ports the image declares are used.' });
     RUN.env = envEditor($('#qEnvRows'), { fk: 'qe', empty: 'No variables - the image\'s own defaults apply.' });
-    RUN.vols = volEditor($('#qVolRows'), { fk: 'qv', empty: 'No volumes or folders - files the app writes are gone when the container stops.', emptyVm: 'No volumes.' });
+    RUN.vols = volEditor($('#qVolRows'), { fk: 'qv', empty: 'No volumes or folders - files the app writes stay in the container until it is removed (with a RAM root: until it stops).', emptyVm: 'No volumes.' });
     RUN.ports.render();
     RUN.env.render();
     RUN.vols.render();
@@ -4474,6 +4785,8 @@
     onClick('#qVolAdd', () => RUN.vols.add());
     for (const id of ['#qEngine', '#qPriv', '#qHostNet']) on(id, 'change', onRunEngineChange);
     onRunEngineChange();
+    on('#qRootfs', 'change', onRootfsChange);
+    onRootfsChange();
 
     // containers
     onClick('#btnCleanCtr', deleteTempCtrs);
@@ -4489,6 +4802,7 @@
     CS.ports.render();
     on('#cp-settings', 'input', (e) => { if (e.target && e.target.id && /^cs/.test(e.target.id)) csDirty(); });
     on('#cp-settings', 'change', (e) => { if (e.target && e.target.id && /^cs/.test(e.target.id)) csDirty(); });
+    on('#csRootfs', 'change', csRootfsHint);
     onClick('#csSave', csSave);
     onClick('#csUndo', () => { hideErr($('#csErr')); setText($('#csStatus'), ''); csFill(true); });
     on('#volDetails', 'toggle', () => loadVolumes(true));

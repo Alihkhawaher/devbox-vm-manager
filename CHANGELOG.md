@@ -1,5 +1,167 @@
 # Changelog
 
+## 2.1.0
+
+**Containers run from a disk now, so they need about 128 MB of RAM whatever
+the image size - light enough to run the manager inside another VM.**
+
+### Disk root (the new default for every image)
+
+- The first run of an image writes it once into a read-only **image disk**
+  (ext4 in a sparse qcow2, built in Node - as fast as the old in-memory boot
+  image: 1 s for nginx, 5-6 s for a 606 MB image). Every container of that
+  image shares it; each container gets its own copy-on-write **writable
+  layer**, kept across stops and restarts until the container is removed, as
+  in Docker. **Start fresh** drops it.
+- Memory no longer follows the image: 128 MB by default (96 at least). nginx
+  answers HTTP 200 after 1.3 s instead of 1.8 s, and its QEMU uses 170 MB
+  instead of 292 MB. A 606 MB image that needed 1,456 MB as a RAM root runs
+  at 96 MB. The end-to-end test, on a busier PC, measured the same memory
+  (nginx 171 vs 293 MB, python 171 vs 292 MB) and 2.0 s vs 2.8 s to nginx's
+  first answer. It also read a 601 MB image back byte for byte at the default
+  128 MB.
+- A disk-root container that runs out of memory is offered 1.5 times the
+  memory it had (at least 192 MB) - also when that happens long after it
+  started: init reports the kernel's out-of-memory kills (`__DEVBOX_OOM`),
+  and a JVM, Node, Go or InnoDB out-of-memory error counts too.
+- Apps known to need more than the small default get it unless the run sets
+  its own memory: PostgreSQL 256 MB; MySQL, MariaDB, MongoDB and Java apps
+  512 MB; Elasticsearch 1 GB (recognised by the program the image starts or
+  its environment, never by its size; the start's log says so). Containers
+  created by 2.0 with automatic memory keep their old RAM-root memory at
+  their first disk-root start.
+- If the data folder's disk fills up while a container writes, QEMU pauses
+  it rather than lose the write: the list shows **paused: disk full** (MCP
+  `paused`), it resumes by itself once there is room again, and a Stop ends
+  it at once.
+- Copy-in on a disk root copies the folder over the container's files at
+  every start: files deleted on this PC are not deleted in the container
+  (the GUI, MCP and README say so).
+- The old in-memory root stays as an opt-in: **RAM** under Run > Advanced >
+  Root filesystem, `rootfs: "ram"` in the API and MCP, or the default in
+  Settings. Nothing ever switches to it by itself. Large images no longer go
+  to Docker-in-VM because of their size.
+- The GUI shows a **Disk** / **RAM** badge per container, the writable
+  layer's size, and lets a container switch its root filesystem for its next
+  start. The Images card shows each image disk's size.
+- MCP: `run_image` and `deploy_image` take `rootfs` (default disk); their
+  descriptions and the server instructions say what persists; results and
+  `list_containers` carry `rootfs` and the writable layer's size;
+  `memory_mb` goes down to 96. A full VM still needs 256 MB: `deploy_image`
+  refuses less for `engine="docker-vm"` or `privileged`, and an automatic
+  fallback to a full VM gives the VM its default instead.
+
+### Light profile and running inside another VM
+
+- **Settings > Light profile** (`"lightProfile": true` in `config.json`)
+  lowers the defaults: containers 112 MB, a new full VM 512 MB, QEMU's TCG
+  translation cache 64 MB for containers and 256 MB for full VMs (instead of
+  QEMU's 1 GB), the Alpine download deleted after the base image is built,
+  unused images pruned after 7 days. Each value can also be set on its own;
+  an explicit value always wins. Measured under TCG with nginx: 229 MB of
+  QEMU memory instead of 434 MB. A full VM created with the light profile's
+  512 MB answered SSH 21 s after the request with WHPX (578 MB of QEMU
+  memory), and 88 s under forced TCG (866 MB).
+- Without hardware acceleration the GUI (**This PC > How to turn it on**,
+  Settings > Acceleration), the Setup list and MCP `status` (`accel_hint`)
+  say how to enable it: nested virtualization for Hyper-V, VMware
+  Workstation and ESXi, VirtualBox and Proxmox/KVM (only the outer
+  hypervisor's steps when the manager can tell which), the firmware switch on
+  a physical PC, then the Windows Hypervisor Platform feature. The README has
+  a new section, "Running inside another VM", with the same steps. They were
+  checked against the vendors' documentation, which the section links to.
+  The section also says what to expect under TCG.
+- `POST /api/settings` takes the engine settings (written to `config.json`;
+  `null` goes back to the profile default) and checks every field before
+  anything is saved; `GET /api/state` reports them with both profiles'
+  defaults and `accelHint`.
+- `tools/mcp-probe.js` checks that `run_image` and `deploy_image` offer
+  `rootfs` (`--expect-params` for more).
+
+### Upgrading from 2.0
+
+- Containers created by 2.0 have no root filesystem setting. They become
+  disk-root containers, starting from the clean image as their RAM root did.
+  A container that is running while the manager is updated keeps its RAM
+  root until it stops.
+- The first disk-root run of each cached image builds its image disk: about
+  1 s for nginx, 5-6 s for a 600 MB image.
+- Init changed, so the RAM root's boot images are built again the first
+  time each one is needed.
+- Restart the manager after updating. Running VMs and containers keep
+  running and are picked up again. Claude's MCP server runs the new code
+  after `restart_server` or a restart of Claude.
+
+### Fixes
+
+- Review fixes for the disk root, before release:
+  - A forced image removal or a prune that waited for a starting
+    container's image lock could delete the image disk that container was
+    about to boot (and its later starts then failed). The start now claims
+    its disk inside the lock, and removal and prune read who uses what
+    under it; a disk that is gone anyway is a clear `ROOT_DISK_MISSING`
+    instead of a QEMU failure.
+  - `/` on an image disk took the mode and owner of the image's `./` tar
+    entry: an image packed from a `0700` folder locked every non-root user
+    out. It is 0755 root:root now, as in Docker (the RAM root gets root's
+    owner too). Image disks are rebuilt once (new disk format).
+  - A file with 1,021-1,360 extents (about 128-170 GiB with the normal extent
+    size) made the image-disk writer overflow a block.
+  - The disk root's `/.devbox` tmpfs (16 MB) could fill up with the path
+    list of a large copy-in.
+  - A shared disk boot archive could be pruned between a start finding it
+    and booting it; a disk with no sidecar was deleted without the image's
+    lock.
+  - On Linux and macOS, a symbolic link for `microvms/` or `images/` broke
+    the relative path a writable layer uses for its image disk: the manager
+    now writes the full path in that case.
+  - An image whose download alone is larger than `microvmImageMaxGB` is
+    refused before the download, not after it.
+  - Presets kept an earlier RAM choice for the root filesystem; a bad
+    `rootfs` passed when the request went to Docker-in-VM; the Images list
+    and MCP `list_images` lost the unpacked size of disk-root images; the
+    first acceleration hint did not yet name the outer hypervisor.
+  - The GUI shows when the light profile is on, and the memory fields say
+    when a small value is too small.
+- `POST /api/container/run` checked whether the engine was ready before it
+  checked the request. On a PC without the kernel, a bad field got 409
+  `NO_KERNEL` instead of 400. It now checks the request first, so a bad field
+  (an unknown `rootfs`, memory below the floor, a bad port) is a 400 on every
+  PC.
+
+### Tests and documentation
+
+- The end-to-end test (`tests/microvm-e2e.test.js`, opt-in) runs every case
+  on the disk root unless the case asks for RAM. New cases:
+  - busybox: environment, user, workdir, hostname and the open-files limit;
+  - nginx on a LAN port, and nginx-unprivileged as `USER 101`;
+  - a python TLS 1.3 handshake, and the guest clock against this PC's;
+  - disk-root against RAM-root memory, for nginx and python;
+  - a synthetic ~600 MB image;
+  - one image disk shared by five containers;
+  - a QEMU killed while it writes;
+  - a force-removed image;
+  - the data folder moved to another path;
+  - TCG with the normal and the light profile;
+  - MCP `status` and `run_image` with each root;
+  - a light-profile full VM, also under forced TCG;
+  - the guest-view check: a container lists its root from inside the guest
+    (every path, mode, owner, link, size, time and byte) and it must equal
+    the tree built on this PC - 0 differences for the six cached images and
+    a synthetic edge image;
+  - the prune of image disks and disk boot archives (files back-dated past
+    the 10-minute age rule).
+
+  Options: `DEVBOX_E2E_REPORT` writes the measurements, and
+  `DEVBOX_E2E_MAX_GUESTS` caps how many guests run at once. In the 2.1 run,
+  32 of 32 microVM cases and 2 of 2 full-VM cases passed.
+- The image-disk writer is read back with a small ext4 reader
+  (`tests/helpers/ext4read.js`), and the image-disk GC has its own tests.
+  `npm test`: 675 tests, 670 pass, 5 skipped, 0 fail. A golden test pins
+  the bytes of a fixed image's disk per disk format.
+- `docs/ARCHITECTURE.md` describes the disk-root pipeline, the two boot
+  stages, and the image disks and writable layers with their locks and GC.
+
 ## 2.0.0
 
 **Docker images now run on Windows without Docker Desktop, WSL or Hyper-V.**

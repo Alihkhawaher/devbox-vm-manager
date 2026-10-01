@@ -5,8 +5,10 @@
  * QEMU publishes "<name>.sha512" without ".exe"), the cloud-init seed (unique
  * instance-id, rc marker, tzdata; its shell snippets checked by a real sh),
  * the bake's QEMU arguments, the incremental log watcher, the seed server,
- * prerequisites, and the validation rules (refuse a rebuild under clones).
- * Nothing is downloaded and no QEMU is started.
+ * prerequisites, the validation rules (refuse a rebuild under clones), the
+ * hint for a PC without hardware acceleration (nested virtualization in the
+ * outer hypervisor) and the light profile's Alpine-download policy.
+ * Nothing is downloaded; QEMU only runs in the tests marked "real QEMU".
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -507,4 +509,159 @@ test('one-click setup: refuses early what it cannot do, skips what is done (no d
     resetConfig();
     rm(root);
   }
+});
+
+// ---------------------------------------------------------------------------
+// no hardware acceleration: the hint (SPEC-diskroot section 11)
+// ---------------------------------------------------------------------------
+test('outerHypervisor: Win32_ComputerSystem / DMI strings -> the outer hypervisor', () => {
+  const o = install.outerHypervisor;
+  assert.equal(o('Microsoft Corporation', 'Virtual Machine'), 'hyper-v');
+  assert.equal(o('Microsoft Corporation', 'Surface Laptop 5'), null, 'a Surface is a physical PC');
+  assert.equal(o('VMware, Inc.', 'VMware7,1'), 'vmware');
+  assert.equal(o('VMware, Inc.', 'VMware20,1'), 'vmware');
+  assert.equal(o('innotek GmbH', 'VirtualBox'), 'virtualbox');
+  assert.equal(o('Oracle Corporation', 'VirtualBox'), 'virtualbox');
+  assert.equal(o('QEMU', 'Standard PC (Q35 + ICH9, 2009)'), 'kvm');
+  assert.equal(o('Proxmox', 'x'), 'kvm');
+  assert.equal(o('Red Hat', 'KVM'), 'kvm');
+  assert.equal(o('Xen', 'HVM domU'), 'xen');
+  assert.equal(o('Parallels Software International Inc.', 'Parallels Virtual Platform'), 'parallels');
+  assert.equal(o('Amazon EC2', 'm5.large'), 'cloud');
+  assert.equal(o('Google', 'Google Compute Engine'), 'cloud');
+  assert.equal(o('Dell Inc.', 'XPS 15 9530'), null);
+  assert.equal(o('LENOVO', '21CB'), null);
+  assert.equal(o('', ''), null);
+  assert.equal(o(null, undefined), null);
+});
+
+test('buildAccelHint: the outer hypervisor\'s own steps when known, every one when not; the Windows feature on this PC', () => {
+  const win = (vendor) => install.buildAccelHint({ platform: 'win32', arch: 'x64', vendor: vendor, accelFix: 'turn on WHP' });
+  // inside Hyper-V: only its steps, the verified command, the prerequisites
+  const hv = win({ manufacturer: 'Microsoft Corporation', model: 'Virtual Machine' });
+  assert.equal(hv.accel, 'tcg');
+  assert.equal(hv.insideVm, true);
+  assert.equal(hv.outer, 'hyper-v');
+  assert.deepEqual(Object.keys(hv.steps), ['hyper-v']);
+  assert.match(hv.steps['hyper-v'][0], /`Set-VMProcessor -VMName "<VM name>" -ExposeVirtualizationExtensions \$true`/);
+  assert.match(hv.steps['hyper-v'][0], /switched off/);
+  assert.match(hv.steps['hyper-v'][1], /VT-x and EPT.*8\.0.*AMD.*9\.3/);
+  assert.match(hv.summary, /itself a virtual machine \(Hyper-V\)/);
+  assert.match(hv.inner[0], /Windows Hypervisor Platform.*`Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform`/);
+  assert.match(hv.fix, /Set-VMProcessor/);
+  assert.doesNotMatch(hv.fix, /`/, 'fix is plain text for the Copy button');
+  assert.doesNotMatch(hv.summary, /`/);
+  assert.match(hv.readme, /README\.md, section "Running inside another VM"/);
+  assert.match(hv.fix, /Running inside another VM/);
+  // VMware: Workstation and ESXi report the same strings - both are shown
+  const vw = win({ manufacturer: 'VMware, Inc.', model: 'VMware7,1' });
+  assert.deepEqual(Object.keys(vw.steps), ['vmware', 'vmware-esxi']);
+  assert.match(vw.steps.vmware[0], /Virtualize Intel VT-x\/EPT or AMD-V\/RVI/);
+  assert.match(vw.steps['vmware-esxi'][0], /Expose hardware assisted virtualization to the guest OS/);
+  assert.match(vw.steps.vmware[1], /Hyper-V or Virtualization-based security/);
+  // VirtualBox, Proxmox / KVM
+  assert.match(win({ manufacturer: 'innotek GmbH', model: 'VirtualBox' }).steps.virtualbox[0], /`VBoxManage modifyvm "<VM name>" --nested-hw-virt on`/);
+  const kvm = win({ manufacturer: 'QEMU', model: 'Standard PC (i440FX + PIIX, 1996)' });
+  assert.equal(kvm.steps.kvm.length, 3);
+  assert.match(kvm.steps.kvm.join(' '), /kvm_intel\/parameters\/nested.*options kvm-intel nested=Y.*options kvm-amd nested=1.*qm set <vmid> --cpu host/);
+  // a physical PC: the firmware switch and the Windows feature, no hypervisor steps
+  const pc = win({ manufacturer: 'Dell Inc.', model: 'XPS 15' });
+  assert.equal(pc.insideVm, false);
+  assert.deepEqual(Object.keys(pc.steps), ['bare-metal']);
+  assert.match(pc.summary, /Windows Hypervisor Platform/);
+  assert.match(pc.fix, /^Turn on the optional Windows feature/);
+  // not known yet (the background check is running): every hypervisor
+  const unknown = win(null);
+  assert.equal(unknown.insideVm, null);
+  assert.deepEqual(Object.keys(unknown.steps), ['hyper-v', 'vmware', 'vmware-esxi', 'virtualbox', 'kvm', 'bare-metal']);
+  assert.deepEqual(Object.keys(unknown.labels), Object.keys(unknown.steps));
+  assert.match(unknown.summary, /If this PC is a virtual machine/);
+  // Linux: this machine's fix is /dev/kvm, not the Windows feature
+  const lx = install.buildAccelHint({ platform: 'linux', arch: 'x64', vendor: { manufacturer: 'QEMU', model: 'Standard PC' }, accelFix: 'For speed, make /dev/kvm usable: sudo usermod -aG kvm $USER, then log out and in again.' });
+  assert.match(lx.inner[0], /^Then, on this machine: for speed, make \/dev\/kvm usable/);
+  assert.doesNotMatch(lx.inner.join(' '), /Windows Hypervisor Platform/);
+  // Apple Silicon: nothing to turn on
+  const mac = install.buildAccelHint({ platform: 'darwin', arch: 'arm64', vendor: null });
+  assert.deepEqual(mac.steps, {});
+  assert.match(mac.summary, /Apple Silicon/);
+  // every hint names the light profile as the stop-gap
+  for (const h of [hv, vw, kvm, pc, unknown, lx, mac]) assert.match(h.summary, /light profile/);
+});
+
+test('the machine is asked once at manager start, beside the accelerator detection - the first TCG hint already names the outer hypervisor (cov-9)', () => {
+  assert.equal(typeof install.prefetchVendor, 'function');
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
+  const detect = src.indexOf('platform.detectAccel(q)');
+  const pre = src.indexOf('install.prefetchVendor()');
+  assert.ok(detect > 0 && pre > detect && pre - detect < 600, 'called in the start-up block, next to the detection');
+});
+
+test('accelHint(): only when detection finished and found nothing but TCG', () => {
+  const saved = platform.accelStatus;
+  try {
+    platform.accelStatus = () => ({ available: null, recommended: null, detecting: true });
+    assert.equal(install.accelHint(), null);
+    platform.accelStatus = () => ({ available: null, recommended: null, detecting: false });
+    assert.equal(install.accelHint(), null, 'not checked yet (no QEMU)');
+    platform.accelStatus = () => ({ available: ['whpx', 'tcg'], recommended: 'whpx', detecting: false });
+    assert.equal(install.accelHint(), null);
+    platform.accelStatus = () => ({ available: ['tcg'], recommended: 'tcg', detecting: false });
+    const h = install.accelHint();
+    assert.equal(h.accel, 'tcg');
+    assert.ok(Object.keys(h.steps).length >= 1);
+    // the prerequisites row says the same
+    const p = install.prereqs();
+    assert.equal(p.accel.ok, false);
+    assert.equal(p.accel.detail, h.summary);
+  } finally { platform.accelStatus = saved; }
+});
+
+// ---------------------------------------------------------------------------
+// light profile: the pristine Alpine download after the base build
+// ---------------------------------------------------------------------------
+test('dropAlpineDownload: deleted after a base build only when keepAlpineDownload is off; Setup says why; a rebuild downloads it again', withKeyRoot('alpine-drop', async () => {
+  const src = { url: 'https://x/nocloud.qcow2', file: 'nocloud_alpine-3.23.4-x86_64-bios-cloudinit-r0.qcow2', sha512: 'abc' };
+  fs.writeFileSync(CFG.alpine, Buffer.alloc(4096, 1));
+  fs.writeFileSync(CFG.alpine + '.json', JSON.stringify(src));
+  fs.writeFileSync(CFG.base, 'base');
+  // the normal profile keeps it
+  assert.equal(CFG.keepAlpineDownload, true);
+  let t = fakeT();
+  assert.equal(install.dropAlpineDownload(t), false);
+  assert.ok(fs.existsSync(CFG.alpine));
+  assert.deepEqual(t.lines, []);
+  // the light profile drops it, records why, and logs what it freed
+  CFG.keepAlpineDownload = false;
+  t = fakeT();
+  assert.equal(install.dropAlpineDownload(t), true);
+  assert.equal(fs.existsSync(CFG.alpine), false);
+  assert.match(t.lines.join('\n'), /Deleted the Alpine download \(4\.0 KB freed\).*downloads it again/);
+  const side = JSON.parse(fs.readFileSync(CFG.alpine + '.json', 'utf8'));
+  assert.equal(side.file, src.file, 'the record stays');
+  assert.equal(side.deletedBytes, 4096);
+  assert.ok(Date.parse(side.deletedAt));
+  // Setup: not "missing", but "not kept"
+  const p = install.prereqs();
+  assert.equal(p.alpine.ok, true);
+  assert.match(p.alpine.detail, /not kept after the base image was built.*rebuilding the base downloads it again/);
+  // nothing left to drop: a no-op
+  assert.equal(install.dropAlpineDownload(fakeT()), false);
+  // without the base the download is simply missing (a rebuild needs it)
+  fs.rmSync(CFG.base);
+  assert.equal(install.prereqs().alpine.ok, false);
+  assert.match(install.prereqs().alpine.detail, /not downloaded yet/);
+}));
+
+test('the bake drops the Alpine download only after a SUCCESSFUL build, and only once its overlay is gone', () => {
+  const srcText = fs.readFileSync(path.join(__dirname, '..', 'lib', 'install.js'), 'utf8');
+  const fin = srcText.slice(srcText.indexOf('async function bakeBase('), srcText.indexOf('function dropAlpineDownload('));
+  const finallyBlock = fin.slice(fin.lastIndexOf('} finally {'));
+  assert.ok(finallyBlock.indexOf("fs.rmSync(work") !== -1 && finallyBlock.indexOf('dropAlpineDownload(t)') > finallyBlock.indexOf('fs.rmSync(work'),
+    'the work overlay (backed by the Alpine image) is removed first');
+  assert.match(finallyBlock, /if \(!ok\)[^\n]*\n\s*\/\/[^\n]*\n\s*else dropAlpineDownload\(t\)/, 'only when the base was written');
+  // and a rebuild finds the file missing and downloads it again (no
+  // "already there" shortcut that would skip the download)
+  const ensure = srcText.slice(srcText.indexOf('async function ensureAlpineImage('), srcText.indexOf('// the bake'));
+  assert.match(ensure, /if \(exists\(CFG\.alpine\)\)/);
+  assert.match(ensure, /await download\(img\.url, CFG\.alpine/);
 });

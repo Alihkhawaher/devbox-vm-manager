@@ -41,7 +41,7 @@ page is the map.
 | Module | Role |
 |---|---|
 | `server.js` | Entry point. Works only when started directly. It sets `UV_THREADPOOL_SIZE=16` before anything touches the file system (the file server's reads and writes run on the pool). It parses the CLI, resolves the data folder, and refuses a second manager for the same folder (it opens the first). It loads `vms.json` and `containers.json`, re-protects the SSH key, listens (next free port on EADDRINUSE) and writes `run/manager.json`. It then re-adopts running VMs and containers, restores the running VMs' shared folders, autostarts, and shuts down on SIGINT/SIGTERM/SIGHUP/SIGBREAK. |
-| `lib/config.js` | `CFG`, one shared object that `configure()` changes in place: data root and port precedence, every path under the root, host-derived limits, the access token, `parseArgs`, the optional `config.json` keys, `setConfigValue` (only `ninepPort` is ever written by the manager). |
+| `lib/config.js` | `CFG`, one shared object that `configure()` changes in place: data root and port precedence, every path under the root, host-derived limits, the access token, `parseArgs`, the optional `config.json` keys, the engine settings and light profile (`ENGINE_SETTINGS`, `effectiveDefaults`, `engineSettings`, `validateEngineSettings`, `updateEngineSettings` - an explicit `config.json` key beats the profile), `setConfigValue`/`setConfigValues` (`ninepPort`, and the engine settings from `POST /api/settings`). |
 | `lib/platform.js` | The OS abstraction: tool discovery (`findTool`), QEMU process listing (tasklist CSV, `/proc`, `ps`), listening sockets (netstat read by the foreign address so the display language does not matter, `ss`, `/proc/net/tcp`, `lsof`), port-free checks on 127.0.0.1 and 0.0.0.0 (one probe per port at a time), `internalHost()` (a random private 127.x.y.z per start, or null = unix sockets), accelerator detection, browser, disk free, private-file permissions, time zone, install hints. The parsers are pure and tested with fixtures. |
 | `lib/util.js` | `run()` with bounded output capture, validators (`vmNameError`, image refs, container names), `shq`, atomic writes, exact log tails, size-capped logs, `probeSsh`, and the API error helpers (`badRequest`, `notFound`, `conflict`). |
 | `lib/state.js` | `vms.json` v2: load (v1 migration, corrupt-file recovery, `.bak`), save only on change and atomically, VM record helpers (forwards keep `proto`), per-VM file paths, global settings. |
@@ -50,12 +50,12 @@ page is the map.
 | `lib/ssh.js` | ssh/scp argument builder (BatchMode, `accept-new`, per-VM known_hosts), `sshExec` with exit codes, stdin, timeouts and head+tail output caps; SSH key creation and protection. |
 | `lib/monitor.js` | QEMU HMP client: waits for the banner prompt, one command at a time per monitor; `hostfwd_add/remove` with the bind address and protocol (confirmed through `info usernet`), `system_powerdown`, `quit`. Used for VMs and microVMs alike. |
 | `lib/download.js` | HTTPS downloads to a per-writer `.part` with connect and idle timeouts, size and sha512 checks; `fetchText`, `headInfo`. |
-| `lib/install.js` | Prerequisites (including the microVM kernel row), one-click setup (`only: "microvm"` stops after the kernel), QEMU discovery/install/update (Windows; refused while VMs or containers run), Alpine image discovery, the cloud-init seed server, the bake (which installs the `devbox-shares` service). |
-| `lib/vm.js` | VM lifecycle and status (pid + QEMU check, background SSH probes, a shared in-flight `listVms`), QEMU arguments (the WHPX CPU model from `microvm/hostcpu`, the shared-folder fw_cfg list), accelerator choice with TCG retry, stop sequence, reset, snapshots, compact, resize, grow fs, freeze, settings, live port changes, the network overview (VMs and containers), adoption, autostart. |
+| `lib/install.js` | Prerequisites (including the microVM kernel row), one-click setup (`only: "microvm"` stops after the kernel), QEMU discovery/install/update (Windows; refused while VMs or containers run), Alpine image discovery, the cloud-init seed server, the bake (which installs the `devbox-shares` service), `accelHint()` (nested-virtualization steps when the only accelerator is TCG: the outer hypervisor from `Win32_ComputerSystem` / DMI, cached), and `dropAlpineDownload` after a successful bake when `keepAlpineDownload` is off. |
+| `lib/vm.js` | VM lifecycle and status (pid + QEMU check, background SSH probes, a shared in-flight `listVms`), QEMU arguments (the WHPX CPU model from `microvm/hostcpu`, the shared-folder fw_cfg list), accelerator choice with TCG retry (a TCG VM gets `tb-size=CFG.vmTcgTbSizeMB`: 256 MB with the light profile instead of QEMU's 1 GB), stop sequence, reset, snapshots, compact, resize, grow fs, freeze, settings, live port changes, the network overview (VMs and containers), adoption, autostart. |
 | `lib/sessions.js` | Terminal sessions: `ssh -tt` with pty size, or the VM's serial socket; SSE output batched every 20 ms, with byte offsets for replay; idle sessions reaped. |
 | `lib/docker.js` | Docker state (one ssh call), install/start, pull, run, container actions, rmi, compose (YAML over stdin as base64), logs, image inspect. |
 | `lib/deploy.js` | Port planning (TCP and UDP), the safe redeploy script with rollback, deploy into a VM, quick deploy (new VM + deploy, deleted again on failure). The Docker-in-VM engine and fallback of `POST /api/container/run`. |
-| `lib/http.js` | The HTTP server: Host/Origin/token/content-type checks, body limits, security headers, static files from `public/`, and the data-driven route table (`ROUTES`, with the route tables of `microvm/routes.js` and `shares-routes.js` appended). |
+| `lib/http.js` | The HTTP server: Host/Origin/token/content-type checks, body limits, security headers, static files from `public/`, and the data-driven route table (`ROUTES`, with the route tables of `microvm/routes.js` and `shares-routes.js` appended). `POST /api/settings` checks the VM keys and the engine keys before saving anything and replies with both merged; `/api/state` carries `accelHint`. |
 | `lib/route.js` | Route-table helpers shared by `http.js` and the route tables other modules export: `taskRoute` (validate first, then a task with `vm`/`ctr`), `accepted()` (a 202 from a handler), `startTask`. |
 | `lib/client.js` | API client for the MCP server and tools: finds the manager through `run/manager.json`, starts a headless one if needed, token auth, `waitForTask`. |
 | `lib/mcp/protocol.js` | MCP over stdio: JSON-RPC 2.0 framing (byte-safe, one object per line), version negotiation, tool registry, JSON Schemas from parameter tables, lax argument checking, concurrent requests. |
@@ -65,8 +65,8 @@ page is the map.
 | `lib/oci/registry.js` | Registry v2 client: references, token auth, HEAD-first tag resolution (a cached tag with pull policy `missing` makes no request), verified blobs to a per-writer `.part`, resume of its own `.part`, redirects without leaking credentials, rate-limit headers, `AbortSignal`. |
 | `lib/oci/layers.js` | Streaming tar reader and the two-pass flatten (whiteouts, opaque dirs, hard links, symlinked parents) with caps on entries, bytes and depth. |
 | `lib/oci/cpio.js` | THE newc cpio writer (streaming or in memory, `autoParents`), readers, the initramfs checker, `flattenToCpio`/`ensureRootfsCpio`, and the kept `.json` sidecar of a (transient) rootfs archive. |
-| `lib/oci/images.js` | The image cache: keyed mutex (`withImageLock`), `images/index.json` (the only file the cache rewrites on use), `listImages`, remove with Docker's `rmi` rules, prune, age- and use-aware boot-image GC, `requireSpace`. |
-| `lib/microvm/` | The microVM engine (one Docker image = one headless VM; see [the run pipeline](#docker-images-without-docker-the-microvm-run-pipeline)). `containers.js` is the contract the rest of the app calls: the registry, status machine, start flow, supervisor, stop protocol, adoption and autostart. The building blocks: `run.js` (prepare, launch, watch, the stop primitives), `plan.js` (content-keyed boot images, run plans, host facts per accelerator), `init.sh` (PID 1 in the guest), `initramfs.js` (run spec, init archive), `qemu-args.js`, `kernel.js` + `apk.js` + `keys/` (verified kernel setup), `store.js` (`containers.json`), `validate.js` (request fields), `compat.js` (rules and failure classifier), `facts.js` (users and s6 read from a boot image), `logs.js` (log tails and the SSE stream), `routes.js`, plus `volumes`, `copyin`, `tail`, `args`, `qcow2`, `mkext4`, `hostcpu`, `vmrun`, `kmod`, `tar`. |
+| `lib/oci/images.js` | The image cache: keyed mutex (`withImageLock`), `images/index.json` (the only file the cache rewrites on use), `listImages`, remove with Docker's `rmi` rules (an image disk a container's writable layer still uses is kept), prune (also stale image disks, disk-root boot archives, and `olderThanDays` for the auto-prune), age- and use-aware boot-image GC, `requireSpace`. |
+| `lib/microvm/` | The microVM engine (one Docker image = one headless VM; see [the run pipeline](#docker-images-without-docker-the-microvm-run-pipeline)). `containers.js` is the contract the rest of the app calls: the registry, status machine, start flow, supervisor, stop protocol, adoption and autostart. The building blocks: `run.js` (prepare, launch, watch, the stop primitives), `rootdisk.js` (the disk root: image disks, writable layers, the small boot archive, their references and GC), `plan.js` (content-keyed boot images, run plans, host facts per accelerator), `init.sh` (PID 1 in the guest), `initramfs.js` (run spec, init archive), `qemu-args.js`, `kernel.js` + `apk.js` + `keys/` (verified kernel setup), `store.js` (`containers.json`), `validate.js` (request fields), `compat.js` (rules and failure classifier), `facts.js` (users and s6 read from a boot image or an image disk's sidecar), `logs.js` (log tails and the SSE stream), `routes.js`, plus `volumes`, `copyin`, `tail`, `args`, `qcow2`, `mkext4`, `hostcpu`, `vmrun`, `kmod`, `tar`. |
 | `lib/ninep/` | The 9P2000.L file server for live shared folders (`server.js`, `proto.js`) and what a guest needs to mount it (`guest.js`: the fw_cfg list format, the SSH mount and unmount scripts, guest-path rules). |
 | `lib/shares.js` | The shared-folder service (see [below](#live-shared-folders-the-9p-share-service)): one 9P server per manager, share validation and records, the private fw_cfg lists, lifecycle hooks for VMs and containers, mount jobs over SSH, reboot and restart handling, status. `lib/shares-routes.js` holds its routes; `lib/assets/devbox-shares.initd` is the guest's OpenRC service. |
 | `public/` | `index.html` (markup only), `app.js` (all behaviour), `app.css` (all styling), `vendor/` xterm.js. No inline script or style anywhere (CSP). |
@@ -96,32 +96,65 @@ A single image runs as its own headless microVM. No Docker Engine is involved:
 the manager is the image puller, the unpacker and the supervisor, and a
 busybox shell script is PID 1.
 
+There are two root file systems (`record.rootfs`, chosen when the container
+is created: the request's `rootfs`, else `config.json` `microvmRootfs`, else
+`disk` - never switched to RAM automatically):
+
+- **disk** (the default): the image is written ONCE, on the host, into a
+  read-only ext4 **image disk** shared by every container of that image, and
+  each container writes into its own copy-on-write qcow2 overlay of it - its
+  **writable layer**, kept across stops and restarts like Docker's. Guest RAM
+  does not depend on the image size: 128 MB by default (112 with the light
+  profile, at least 96). nginx runs with 170 MB of QEMU private memory instead
+  of 292 MB as a RAM root, and a 600 MB image runs at the default instead of
+  needing 1.4 GB.
+- **ram** (opt-in): the v2.0 engine - the whole image is an initramfs held in
+  guest RAM (about 2.2 x the image + 90 MB to boot) and resets at every start.
+
 ```
  registry (HTTPS, token, HEAD first)
      │  verified blobs (sha256, size) ─► images/blobs/sha256/<hex>        (lib/oci/registry.js)
      ▼
- flatten in memory: whiteouts, opaque dirs, hard links, symlinked parents,
+ index pass in memory: whiteouts, opaque dirs, hard links, symlinked parents,
  caps on entries/bytes/depth - never unpacked onto NTFS                    (lib/oci/layers.js)
+     │
+     ├── disk root (default) ─────────────────────────────────────────────────────────────
+     │   ▼  ONE sequential pass over the layer blobs, every file written to its final
+     │      place: directories, extents, symlinks, hard links, modes, owners, mtimes
+     │   images/disks/<cfg12>-<key16>.qcow2 (+ .json sidecar, written last) - read-only
+     │   ext4 in a sparse qcow2, built once per image under images.withImageLock and
+     │   shared by its containers                       (lib/microvm/mkext4.js, rootdisk.js)
+     │   ▼
+     │   microvms/<id>/root.qcow2 - the container's writable layer: an overlay whose
+     │   backing file is the RELATIVE name ../../images/disks/<name> (movable data folder)
+     │   images/initrd/disk-<key16>.initrd - busybox, init.sh and only the modules this
+     │   run needs (4.4 MB; built in ~20 ms, shared by every run with that module set)
+     │
+     └── RAM root (rootfs "ram") ──────────────────────────────────────────────────────────
+         ▼
+         images/rootfs/<cfg>-v1.cpio (transient) + its .json sidecar (runtime config, kept)
+         ▼  + the base init archive: static busybox, init.sh, the kernel modules
+         images/initrd/<cfg12>-<key16>.initrd  - keyed by CONTENT, built once per
+         image under images.withImageLock, then the rootfs .cpio is deleted  (lib/microvm/plan.js)
      ▼
- images/rootfs/<cfg>-v1.cpio (transient) + its .json sidecar (runtime config, kept)
-     ▼  + the base init archive: static busybox, init.sh, the kernel modules
- images/initrd/<cfg12>-<key16>.initrd  - keyed by CONTENT, built once per
- image under images.withImageLock, then the rootfs .cpio is deleted          (lib/microvm/plan.js)
-     ▼
- QEMU -machine microvm (q35 when needed) -accel whpx|kvm|hvf -accel tcg,tb-size=128
-      -kernel kernel/<kver>/vmlinuz-virt -initrd <boot image>  (tsc_early_khz=<host facts>)
+ QEMU -machine microvm (q35 when needed) -accel whpx|kvm|hvf -accel tcg,tb-size=128 (light: 64)
+      -kernel kernel/<kver>/vmlinuz-virt -initrd <boot archive>  (tsc_early_khz=<host facts>)
       -fw_cfg opt/devbox/spec=microvms/<id>/spec.sh          the run spec (<= 32 KB)
       -fw_cfg opt/devbox/shares=run/ctr-<id>.shares          share port + keys (private file)
       virtio-serial devbox.stdout / devbox.stderr ─► microvms/<id>/stdout.log, stderr.log
       ttyS0 socket (private 127.x.y.z or unix socket) + console.log: markers, stop requests
       HMP monitor (private): system_powerdown, quit
-      virtio-blk: named volumes (qcow2 / ext4), copy-in (raw cpio, read-only)
+      virtio-blk: the root disk FIRST (disk root: root.qcow2, serial devbox-root),
+                  named volumes (qcow2 / ext4), copy-in (raw cpio, read-only)
       slirp: hostfwd per published port on 127.0.0.1 or 0.0.0.0; 10.0.2.2 = this PC
      ▼
- guest PID 1 = init.sh: mounts, stop-request reader, modules, network, /etc/hosts
- (host.docker.internal), volumes, 9P shares, user, copy-in, RAM-root cap ─► READY
- ─► the app as a foreground job, output relayed ─► exit: kill the rest, drain,
- sync, fstrim, unmount ─► EXIT=<code> ─► poweroff
+ guest PID 1 = init.sh. Disk root, stage 1 (in the initramfs): read the spec, load the
+ modules, mount devbox-root as ext4, a tmpfs at <disk>/.devbox with busybox, init
+ and the spec, move /dev /proc /sys, switch_root ─► stage 2 (on the disk, ROOT marker):
+ stop-request reader, network, /etc/hosts (host.docker.internal), volumes, 9P shares,
+ user, copy-in, (RAM root: the RAM-root cap) ─► READY ─► the app as a foreground job,
+ output relayed ─► exit: kill the rest, drain, sync, fstrim + unmount the volumes,
+ (disk root: remount / read-only) ─► EXIT=<code> ─► poweroff
 ```
 
 QEMU writes every log file itself and each control channel is a short
@@ -133,17 +166,31 @@ growing, while the manager is closed.
 `ctr-start` task, under the lock `ctr:<id>`. Each step checks for a stop
 request, and a stop during these steps aborts the task:
 
+0. **The writable layer** (disk root): when `microvms/<id>/root.qcow2`
+   exists, the container is BOUND to its image by config digest
+   (`record.rootDisk`): step 1 becomes `run.prepareRootByDigest` - no tag
+   lookup, no network; the disk the overlay names, else the image's current
+   disk, else rebuilt from the cached blobs, else `IMAGE_GONE` (409, "start it
+   fresh"). `start {fresh: true}` deletes the layer first (and then resolves
+   the tag again); a container switched to `rootfs: "ram"` drops it at its
+   next start.
 1. **The image**:
    - `registry.pullImage` with the pull policy (`missing` makes no request for
      a cached tag). A later start re-pulls only with `always`.
    - Then the preflight on the manifest and config (`compat.imageRules`:
-     systemd, s6-overlay, the Docker socket, the estimated size).
-   - Then the boot image by content key, under the image's keyed mutex: on a
-     miss, flatten, build the initrd, and delete the rootfs archive again.
+     systemd, s6-overlay, the Docker socket; the estimated size for a RAM
+     root only).
+   - Then, under the image's keyed mutex, the disk root's **image disk** by
+     key (`rootdisk.ensureImageDisk`: on a miss the index pass, the exact
+     free-space check, `mkext4.buildImageExt4`, the sidecar last; the index
+     entry gets `disk`), or the RAM root's boot image by content key (on a
+     miss, flatten, build the initrd, and delete the rootfs archive again).
      Flatten warnings go to the task log and the record.
-2. **Rootfs rules** (`compat.rootfsRules`): the exact size and s6-overlay
-   found in the tree. A finding that needs Docker ends the task with
-   `fallback` set. Engine `auto` never switches by itself.
+2. **Rootfs rules** (`compat.rootfsRules`): s6-overlay found in the tree (a
+   disk root's facts come from the image disk's sidecar), and the exact size
+   of a RAM root. A finding that needs Docker ends the task with `fallback`
+   set. Engine `auto` never switches by itself; a disk root is never "too
+   large" (it needs free disk instead).
 3. **Re-read the registry**. A stop or remove may have come during the slow
    part, and what is attached now is what counts (volume exclusivity). A
    container with shared folders needs a kernel that has the 9P modules.
@@ -156,25 +203,49 @@ request, and a stop during these steps aborts the task:
    running and its manager is gone or is this one).
 6. **Ports**: the image's EXPOSE ports when none were given. Every host port
    must be free on both 127.0.0.1 and 0.0.0.0 right now.
-7. **Copy-in**: a one-way snapshot of the host folders packed into
-   `microvms/<id>/copyin.cpio` (512 MB cap). The guest RAM grows by its size
-   unless it lands inside a volume.
+7. **Copy-in**: the host folders packed into `microvms/<id>/copyin.cpio`
+   at every start (512 MB cap) and extracted over the container's files. A
+   RAM root's guest RAM grows by its size unless it lands inside a volume; on
+   a disk root the files land on the disk and persist - a file deleted on the
+   host since the last start is not deleted in the container.
 8. **Shared folders**: `shares.registerFor('container', id, ...)` with the
    container user's numeric uid:gid. The private fw_cfg list is written to
    `run/ctr-<id>.shares`. A folder that is gone ends the start.
-9. **Memory**: the container's size, else
-   `max(256, recommendedMemMB(initrd) + copy-in)`. The budget check is
+9. **Memory**: the container's size, else for a disk root
+   `CFG.microvmMemMB` (128; 112 with the light profile - the image streams
+   through the page cache) or, for an app known to need more by its program
+   or environment (`plan.diskMemHint`: PostgreSQL 256; MySQL/MariaDB,
+   MongoDB, a JVM 512; Elasticsearch 1024), that - said in the task log; for
+   a RAM root `max(256, recommendedMemMB(initrd) + copy-in)`. A v2.0 record
+   with automatic memory (`autoMemFromRam`, set by `store.normalize`) keeps
+   its old RAM-root value as its explicit `mem` at its first disk-root start. The floor is 96 MB for a
+   disk root and 128 for a RAM root (`MEMORY_TOO_SMALL`). The budget check is
    `memMB + 64 <= free - 512 MB`, because WHPX commits all guest RAM.
 10. **Machine**:
     - `microvm`, unless this QEMU lacks it;
     - q35 when more than 8 virtio devices are needed (the microvm machine
-      has 8 virtio-mmio slots), or when no TSC frequency is known;
+      has 8 virtio-mmio slots; the root disk counts), or when no TSC
+      frequency is known;
     - more than 1 vCPU is clamped on microvm (untested there).
 11. **The run spec** (`plan.buildSpec`): argv by Docker's ENTRYPOINT/CMD
     rules, env, workdir, user, hostname, volume, share and copy-in targets,
     the stop signal and timeout, `host.docker.internal → 10.0.2.2` and the
-    log cap. Every value is single-quoted. The spec is at most 32 KB, because
-    fw_cfg reads cost O(n²).
+    log cap, and `DEVBOX_ROOT=disk|ram`. Every value is single-quoted. The
+    spec is at most 32 KB, because fw_cfg reads cost O(n²).
+11b. **Disk root**: free disk of at least `CFG.minFreeDiskMB` (1024;
+    `NO_SPACE` 409 - the writable layer grows on this disk); then the overlay
+    (`rootdisk.createRootOverlay`, sparse, the image disk's virtual size) on
+    the first start, with `record.rootDisk = {configDigest, disk (relative to
+    the data root), createdAt, virtualBytes}` saved BEFORE the spawn, so GC
+    sees the reference; an existing overlay must name a disk that is still
+    there (`ROOT_DISK_MISSING` 409, "start it fresh"), and a new overlay is
+    refused for a disk that is gone (`ROOT_DISK_MISSING`, "start it again");
+    then the boot archive
+    for this run's module set (`rootdisk.ensureDiskInitrd`). QEMU joins the
+    overlay's folder and the relative backing name without normalising `..`,
+    so that literal string is checked against Windows' 259 characters too;
+    on Linux/macOS the name is checked against the real paths, and a symlinked
+    `microvms/` or `images/` gets an absolute name (`rootdisk.backingName`).
 12. **Spawn** (`run.launch`): the previous boot's logs are rotated to
     `*.prev.log`. QEMU is started directly, detached, with no window, with
     `-pidfile`, fresh private endpoints (`vm.runtimeEndpoints`), and a retry
@@ -187,9 +258,11 @@ request, and a stop during these steps aborts the task:
 
 Before step 1 finishes downloading anything, `registry.pullImage` calls the
 engine's `beforeLayers` hook with the declared layer sizes: the compat rules
-(spec 14.2), `IMAGE_TOO_LARGE` for an image that could not boot even with
-the most memory a VM may get, and `images.requireSpace` for the download plus
-the unpacked copies. The blobs the preparation uses are held
+(spec 14.2), and for a RAM root `IMAGE_TOO_LARGE` for an image that could not
+boot even with the most memory a VM may get and `images.requireSpace` for the
+download plus the unpacked copies; for a disk root only the space for the
+download plus 3.3 x its compressed size (the image disk). A disk root's cap
+is `CFG.microvmImageMaxGB` (16 GiB) unpacked, nothing RAM-derived. The blobs the preparation uses are held
 (`images.holdBlobs`) until it ends, and the record's `configDigest` is set at
 that point, so an image removal or prune meanwhile never deletes them.
 `cpio.flattenToCpio` checks the space again on the exact unpacked size
@@ -206,8 +279,21 @@ enforced by `.gitattributes`). The spec comes from fw_cfg - read first;
 and the flattener drops `/.devbox` from image layers, so an image cannot
 replace it. The **stop-request reader starts right after the spec is
 read**, before modules, volumes, shares and copy-in, so a stop during the boot
-is never lost. The ACPI button reader is armed after the modules load. Then
-init:
+is never lost. The ACPI button reader is armed after the modules load.
+
+A **disk root** boots in two stages of the same script. Stage 1 runs in the
+small initramfs: it reads the spec from fw_cfg, loads the modules, finds the
+virtio disk with serial `devbox-root`, mounts it as ext4 (`rw,noatime`),
+mounts a tmpfs at `<disk>/.devbox` (capped at half the RAM: copy-in extracts
+its list of paths there) and copies busybox, init and the
+spec there (an image cannot put files on that fresh tmpfs), moves `/dev`,
+`/proc` and `/sys` over and `switch_root`s - the initramfs is emptied and its
+RAM freed. Stage 2 (`DEVBOX_STAGE=2`, marker `__DEVBOX_ROOT`) is PID 1 on the
+disk, reads the spec from `/.devbox/run/spec.sh` (no second fw_cfg read) and
+does everything below; there is no RAM-root cap, and `/tmp` is the image's
+own. A missing root disk or a failed mount is exit 125 with the reason.
+
+Then init:
 
 1. brings up the network (10.0.2.15, gateway 10.0.2.2, DNS 10.0.2.3) and
    opens low ports to every user;
@@ -220,8 +306,8 @@ init:
    order; when a dead share is healed (below), everything mounted under it is
    mounted again (`remount_nested`), because the lazy unmount takes it along;
 3. resolves the user and unpacks the copy-in, owned by that user;
-4. caps the RAM root at what it uses plus half the free memory, so a full
-   root gives ENOSPC instead of a deadlock;
+4. (RAM root) caps the root at what it uses plus half the free memory, so a
+   full root gives ENOSPC instead of a deadlock;
 5. prints `__DEVBOX_READY` and runs the app as a **foreground job**, so it
    gets default signal dispositions, as under Docker.
 
@@ -236,9 +322,17 @@ only the first and last 64 KB of `console.log`. When the app exits, init:
 1. SIGKILLs everything else;
 2. lets the relays drain;
 3. syncs, `fstrim`s and unmounts the volumes;
-4. prints `__DEVBOX_EXIT=<code>` (and `__DEVBOX_NOSTART` if the app never
+4. (disk root) remounts `/` read-only, so the journal is checkpointed and the
+   next boot finds a clean file system - also when init gives up (`die`). No
+   `fstrim` of the root: it cost 150-190 ms per exit and grew the writable
+   layer; ext4 reuses freed blocks, so the layer only grows to its high-water
+   mark, as in Docker;
+5. prints `__DEVBOX_OOM=<n>` when the kernel killed processes for lack of
+   memory during the boot (`/proc/vmstat oom_kill`: the console only carries
+   emergency messages, so the kernel's own report never reaches the host),
+   then `__DEVBOX_EXIT=<code>` (and `__DEVBOX_NOSTART` if the app never
    ran);
-5. powers off.
+6. powers off.
 
 A background loop re-mounts a share whose `statfs` fails, because the Linux
 9p TCP transport never reconnects after a manager restart. The new mount is
@@ -251,11 +345,13 @@ strict regexes, capped):
 | Guest to host | Meaning |
 |---|---|
 | `__DEVBOX_INIT uptime=S` | init started (the manager deletes `spec.sh`: QEMU has read it) |
+| `__DEVBOX_ROOT uptime=S` | disk root: stage 2 runs on the root disk (`timings.rootMs`) |
 | `__DEVBOX_STOPPING` | a stop request was accepted (sent for every request) |
 | `__DEVBOX_SIGNAL=<SIG>` | a signal request was passed on |
 | `__DEVBOX_READY` | setup done, the app starts now |
 | `__DEVBOX_ERROR=<text>` | why init gave up (at most 300 characters) |
 | `__DEVBOX_NOSTART` | a stop came before the app started |
+| `__DEVBOX_OOM=<n>` | the kernel killed n processes for lack of memory during this boot (just before EXIT) |
 | `__DEVBOX_EXIT=<code>` | the app exited (always last) |
 
 The host sends `__DEVBOX_STOP [timeout]` and `__DEVBOX_KILL <SIG>`. Lines
@@ -275,7 +371,12 @@ starting `devbox-init:` are init's messages, and the last 20 are kept.
   not boot", with the last console lines.
 - An end with a non-zero code before READY, or within 10 s of it, goes
   through `compat.classify`. That can set `fallback` (needs PID 1, runs
-  containers itself, a kernel panic) or suggest more memory.
+  containers itself, a kernel panic) or suggest more memory. Running out of
+  memory is classified at ANY time: init's `__DEVBOX_OOM` count, or the app's
+  own report on stderr (a JVM, Node, Go, InnoDB, Python); OOM kills are also
+  a warning on the record when the app survived them.
+- Every 5 s it also checks for a guest QEMU paused by a full host disk (see
+  the disk root's GC section).
 - The supervisor is the one source of truth: the run and stop tasks only
   read what it wrote.
 
@@ -302,8 +403,11 @@ handles each record with a runtime:
   pid + list + file suffice). The record is adopted: `console.log` is re-read
   from the start, and the watcher and volume locks are re-attached. Its
   shares are registered again with the same ids, keys and owner
-  (`runtime.shareIds`, else the image's USER from the rootfs sidecar), and
-  the guest heals its mounts.
+  (`runtime.shareIds`, else the image's USER from the rootfs sidecar - or,
+  for a disk root, from the image disk's sidecar), and the guest heals its
+  mounts. What it booted stays "in use" for GC (`runtime.initrd`,
+  `runtime.disk`); a runtime written by a v2.0 manager has no `rootfs` and is
+  a RAM root.
 - **Exited meanwhile**: it gets the code its console shows, or null with
   "stopped outside the manager"; `autoRemove` removes it.
 - **Cannot be told** (no process list and no monitor answer): kept as
@@ -319,6 +423,62 @@ handles each record with a runtime:
   warning is computed from the records, so it goes with the VM.
 
 `autostartAll` then starts autostart containers one after another.
+`adoptAll` also arms the image auto-prune (`CFG.imagePruneDays`, 7 with the
+light profile, 0 = off): 5 minutes after the start, then once a day, an
+`image-prune` task removes images no container used for that long (skipped
+while a container is being started; `CFG` is read at every tick).
+
+### Disk root: image disks, writable layers and their GC
+
+(`lib/microvm/rootdisk.js`; its header comment has the details.)
+
+- **Image disk** `images/disks/<cfgHex12>-<key16>.qcow2` + its `.json`
+  sidecar (written last: runtime config, `/etc/passwd`, `/etc/group` and the
+  s6 check captured while writing, sizes, warnings). The key covers what
+  changes the disk's bytes - `DISK_FORMAT`, the writer's `IMAGE_EXT4_FORMAT`,
+  the layer semantics, the config digest, the minimum virtual size - never
+  the kernel, init or modules: a kernel update does not rebuild image disks.
+  Virtual size `max(microvmImageDiskGB (8) GiB, 2 x need + 256 MiB)`, sparse.
+  The writer is deterministic (UUID and hash seed from the key, times from
+  the image config), so two builders on one data root write identical files
+  and "exists = success" holds across processes.
+- **Writable layer** `microvms/<id>/root.qcow2`: a qcow2 overlay whose
+  backing name is RELATIVE (`../../images/disks/<name>`, backing format
+  recorded, never probed) - the data folder stays movable. Opened by exactly
+  one QEMU; the image disk only ever read-only, by many.
+- **Who references an image disk**: every overlay whose header names it (the
+  header is written by QEMU and the manager only, never the guest, and is
+  what QEMU opens; an unreadable header counts as naming every disk of its
+  record's image, or every disk), every record's `rootDisk.disk`, and every
+  live or starting container (`L.disk`, set before its overlay exists). A
+  start claims its disk (or RAM initrd) INSIDE the image lock, through
+  `prepareImage`'s `onRoot` callback, and image removal and prune read who
+  uses what (functions, not lists) under that same lock - a removal that
+  waited for a start's lock sees the disk that start is about to boot.
+- **A disk is deleted only** when it is not referenced, not the `index.json`
+  disk of an image that stays, at least 10 minutes old (a run may have just
+  built it), and Windows lets it go (open in a QEMU: skipped) - under the
+  image's lock. A forced image removal keeps a referenced disk (listed in
+  `kept`) unindexed - "dangling" - until its last container is removed;
+  `removeRecord` then runs the dangling cleanup. Prune also removes stale
+  disks (one without a sidecar under the locks of every image its name's
+  12-hex prefix matches) and the `disk-*.initrd` boot archives no live
+  container uses (rebuilt in ~20 ms; a cache hit refreshes the archive's
+  mtime, so the age rule covers a start between its cache hit and its
+  claim); the RAM root's initrd GC never touches them.
+- **The bytes of an image disk are pinned**: a missing disk is rebuilt in
+  place under the same name, and every overlay over it is a block-level
+  copy-on-write, so the writer must not change its output without a bump of
+  `IMAGE_EXT4_FORMAT` (or the layer `FORMAT_VERSION`, or `DISK_FORMAT`). A
+  golden test (`tests/microvm-rootdisk.test.js`) records the sha256 of a
+  fixed image's disk per combination of those formats. `/` is always written
+  0755 root:root (format 2), as Docker presents it.
+- **A full host disk**: writable layers and volumes grow as qcow2 files, and
+  QEMU's default error policy pauses the guest when a write finds no room.
+  The supervisor checks the free space every 5 s; when it is below 256 MB it
+  asks the monitor (`info status`), marks a guest paused with `io-error` as
+  `record.paused` (lists, GUI, MCP) and resumes it (`cont`) once 512 MB are
+  free. A Stop of a paused guest quits its QEMU at once.
 
 ## The stop protocol
 
@@ -375,6 +535,81 @@ cannot cache a wrong value labelled whpx. KVM and HVF need no calibration
 `kernel/host-tcg.json` and reuse the hardware accelerator's measured TSC
 when there is one, so a TCG run never replaces the WHPX facts. Concurrent
 first runs share one computation. A machine with no known TSC uses q35.
+
+## Engine settings, the light profile and the acceleration hint
+
+The project's goal is to be light enough to run inside another VM, so the
+engine's defaults are settings, and one switch lowers all of them.
+
+**`ENGINE_SETTINGS`** (`lib/config.js`) is a table. Each key has a normal
+and a light default, a range, and a flag for whether `POST /api/settings`
+may set it. `effectiveDefaults` resolves `config.json` like this:
+
+- `"lightProfile": true` picks the light column;
+- a key set in `config.json` beats the profile;
+- an invalid key is reported (`configWarning`) and takes the profile
+  default, so the manager still starts.
+
+The resolved values are put on `CFG`. The engine reads each one at the
+moment it needs it, so a change from the GUI applies to the next VM or
+container without a restart:
+
+| `config.json` key | Read by | When |
+|---|---|---|
+| `microvmRootfs` | `validate.effectiveRootfs` | a container is created (it becomes the record's `rootfs`) |
+| `microvmMemMB` | `plan.recommendedDiskMemMB` | a disk-root container without its own `mem` starts |
+| `tcgTbSizeMB` | `run.js` → `qemu-args` `-accel tcg,tb-size=` | a container's QEMU is spawned |
+| `vmTcgTbSizeMB` | `vm.js` accelerator arguments | a full VM starts under TCG |
+| `vmDefaultMemMB` (`CFG.defaultMem`) | `vm.js` create and `state.js` (the GUI form and MCP `create_vm` get it from `/api/state` `limits.defaultMem`) | a full VM is created without `mem` |
+| `keepAlpineDownload` | `install.dropAlpineDownload` | after a successful bake |
+| `imagePruneDays` | the auto-prune in `containers.js` | at each daily tick |
+| `minFreeDiskMB` | the container start (step 11b) | every disk-root start |
+| `microvmImageDiskGB`, `microvmImageMaxGB` | `rootdisk.js`, `run.js` | an image disk is sized or an image is checked |
+
+The defaults come from measurements (SPEC-diskroot 1.4 and 1.5):
+
+- every image tried boots on a disk root at 128 MB;
+- python's import-heavy test needs 112 MB and fails at 96;
+- a 64 MB TCG translation cache instead of 128 saves about 84 MB per
+  microVM, for about 1.4 s more to nginx's first answer;
+- QEMU's default TCG cache for a full VM is 1 GiB, and Windows commits it
+  up front: a 256 MB guest cost 1.33 GB. The light profile uses 256 MB.
+
+The profile never switches a container to a RAM root.
+
+**`POST /api/settings`** (`http.updateSettings`) checks the VM keys
+(`accel`, `defaultExpose`) and every engine key
+(`config.validateEngineSettings`) before anything is saved. The engine keys
+go to `config.json` in one atomic write (`setConfigValues`); `null` removes
+a key, so it falls back to the profile default. A `config.json` that cannot
+be parsed is never rewritten (409 `CONFIG_UNREADABLE`). `GET /api/state`
+`settings` carries the effective values, `explicit` (the keys `config.json`
+sets), `profileDefaults {normal, light}` and `ranges`. The GUI's Settings
+dialog shows the normal, light and current value of each from these.
+
+**The acceleration hint** (`install.accelHint()`, `/api/state` `accelHint`,
+MCP `status` `accel_hint`) is null unless the accelerator QEMU would use is
+TCG.
+
+- `readVendor` asks once per process, in the background, what this machine
+  is: `Win32_ComputerSystem` Manufacturer and Model on Windows, DMI
+  `sys_vendor` / `product_name` on Linux.
+- `outerHypervisor` (pure) maps that to `hyper-v`, `vmware`, `virtualbox`,
+  `kvm`, `xen`, `parallels` or `cloud`; null means a physical PC, or
+  unknown.
+- `buildAccelHint` (pure) returns the steps for that hypervisor only. VMware
+  gets both its Workstation and ESXi steps, because both report the same
+  strings. A physical PC gets the firmware switch, and an unknown machine
+  gets every set of steps.
+- The hint ends with the step inside this machine: the Windows Hypervisor
+  Platform feature, or `/dev/kvm` access. Apple Silicon has nothing to turn
+  on.
+- In `steps`, commands are marked with backticks, which the GUI shows as
+  code. `fix` is plain text for Setup's Copy button.
+
+The texts are the same as the README's "Running inside another VM", which
+cites the vendors' documentation, and `tests/install.test.js` pins the key
+commands of each.
 
 ## Live shared folders: the 9P share service
 
@@ -539,7 +774,8 @@ wait for.
 
 Besides task locks, some work is serialised inside the process: the keyed
 mutex `image:<configDigest>` (`images.withImageLock`, so concurrent runs of
-one image build its boot image once), the volume lock files
+one image build its image disk or boot image once, and a disk is never
+deleted while a container of that image is being started), the volume lock files
 `volumes/<name>.lock` (one running container per volume, also across a
 manager restart), the per-VM share mount job, and a module-level promise
 around `ensureKernel`. Image pulls and prunes take no task lock.
@@ -663,15 +899,23 @@ so there is no schema bump or migration. A record holds:
   (`{host, guest, proto, lan, auto}`), `lan`, `volumes[]`, `shares[]`,
   `copyIn[]`, `network`, `mem`, `cpus`, `accel`, `machine`, `stopSignal`,
   `stopTimeout`, `pull`;
+- the root file system: `rootfs` (`disk` | `ram`, resolved when the
+  container is created; a record of v2.0.0 without it loads as `disk` - its
+  RAM root reset at every start, so a fresh disk root is the same starting
+  state) and `rootDisk` (`{configDigest, disk: "images/disks/<name>.qcow2"
+  relative to the data root, createdAt, virtualBytes}` once its writable
+  layer exists, else null; a value that does not name a `.qcow2` under
+  `images/disks/` is dropped on load);
 - the outcome: `status`, `exitCode`, `exitReason`, `initMessages`, `startedAt`,
   `readyAt`, `endedAt`, `lastError`, `warnings`, `fallback`, `stopRequest`,
-  `timings`, `pendingRestart`;
+  `timings` (`diskMs`, `rootMs` for a disk root), `pendingRestart`;
 - `runtime`: `{pid, startedAt, accel, effectiveAccel, machine, memMB, cpus,
-  initrd, monitor, console}` while QEMU runs.
+  initrd, rootfs, disk, overlay, monitor, console}` while QEMU runs.
 
 Every record's ports are reserved, running or not, until it is removed. The
 image cache has its own index (`images/index.json`: references, last use,
-sizes, boot image). `images/refs.json` is written only by a real pull.
+sizes, boot image, `disk: {file, key, bytes, virtualBytes, builtAt}`).
+`images/refs.json` is written only by a real pull.
 
 Per-VM files: `sandboxes/<vm>.qcow2`, `sandboxes/<vm>-serial.log`,
 `logs/qemu-<vm>.log`, `run/<vm>.pid`, `run/known_hosts/<vm>`, `run/<vm>.shares`
@@ -923,7 +1167,8 @@ closes. `lib/mcp/protocol.js`:
 - `initialize`;
 - the initialized notification (it must not be answered);
 - `ping`;
-- `tools/list`, with a schema check of every tool;
+- `tools/list`, with a schema check of every tool, and that `run_image` and
+  `deploy_image` offer `rootfs` (`--expect-params tool.param,...` for more);
 - an unknown method (-32601);
 - an optional tool call (e.g. `run_image`);
 - no stray stdout, and an exit when stdin closes.
@@ -959,6 +1204,9 @@ network:
   - a boot that hangs before init;
   - adoption after a simulated restart;
   - four concurrent starts and the volume race;
+  - the disk root: the writable layer saved before the spawn and kept across
+    a restart (bound by config digest), `fresh`, the switch to RAM, a missing
+    image disk, the memory offer after an out-of-memory end;
   - log rotation and `autoRemove`;
   - live shared folders;
   - the engine rules and the fallback;
@@ -976,6 +1224,14 @@ network:
   symlinked parents), the flatten caps and concurrent first builds.
   `tests/oci-real-images.test.js` and `tests/microvm-compat.test.js` only READ
   the image cache in `data/images` when it exists.
+- **The image disk writer** is checked by reading its output back with a
+  small ext4 reader (`tests/helpers/ext4read.js`): every path, mode, owner,
+  hard link, symlink, device and byte, multi-block directories, depth-1
+  extent trees, skipped entries, deterministic output and an aborted build
+  (`tests/microvm-mkext4-image.test.js`); keys, overlays, references and GC
+  in `tests/microvm-rootdisk.test.js` (with `qemu-img check` when QEMU is
+  there), including the GC races with a starting container and the golden
+  sha256 of a fixed image's disk per disk-key format.
 - **The 9P server** is tested with its own client (`tests/helpers/ninep-client.js`):
   every message type, paging, big round trips, framing abuse, auth failures,
   limits, jail cases, boot-id takeover and backpressure.
@@ -983,19 +1239,38 @@ network:
 - **The end-to-end matrix** is opt-in too (`DEVBOX_E2E=1`,
   `tests/microvm-e2e.test.js`): the real `server.js` on a scratch data root
   whose kernel and image cache are hard links of `data/` (nothing is
-  downloaded), driven over the HTTP API and the MCP server - hello-world,
-  exit codes and streams, 126/127, nginx on this PC only, the V7 squatter, a
-  live share with an edit served at once and a wrong key refused, a volume
-  below a share, the volume race, stops during boot, 4 concurrent runs, 3
-  concurrent cold builds of one image, copy-in, a TCG subset, a forced stop
+  downloaded), driven over the HTTP API and the MCP server. Every case runs
+  on the default disk root unless it asks for RAM: hello-world, exit codes
+  and streams, 126/127, busybox env/workdir/hostname/user/nofile, nginx on
+  this PC only and on a LAN port, nginx-unprivileged as USER 101, python's
+  TLS 1.3 handshake and clock, the V7 squatter, a live share with an edit
+  served at once and a wrong key refused, a volume below a share, the volume
+  race, stops during boot, concurrent runs and cold builds (at most
+  `DEVBOX_E2E_MAX_GUESTS`, 3, at once), copy-in, TCG with the normal and the
+  light profile (times, QEMU memory, the translation cache), a forced stop
   keeping volume data, the RAM-root fill, the memory budget, the QEMU-update
-  refusal, a manager restart with re-adoption and a re-mounted share, MCP
-  `run_image`, and (`DEVBOX_E2E_VM=1`) a full VM's shares both ways,
-  read-only, after a reboot inside the VM and shared by a second VM. It ends
-  only the QEMUs whose command line names its scratch root. Not in it: the
-  kernel setup (it downloads), TLS/DNS from the guest (network), smp-2 (more
-  than 1 vCPU is still clamped on microvm) and the s6/systemd fallback
-  (needs an unapproved image).
+  refusal; the disk-root cases: nginx at 128 and 96 MB, the writable layer
+  across a restart, `fresh`, RAM opt-in, five containers on ONE image disk
+  that is never written, `rmi` refused while they exist, disk vs RAM root
+  memory for nginx and python, a synthetic ~600 MB image read back byte for
+  byte at the default memory (and flagged as a RAM root), a QEMU killed
+  while writing, a force-removed image whose disk a stopped container still
+  boots, the data folder moved to another path; the guest-view check (a
+  container lists its root from inside the guest - every path, mode, owner,
+  link, size, time and byte - and it must equal the tree built on this PC,
+  for every cached approved image and a synthetic edge image); a manager
+  restart with re-adoption and a re-mounted share; MCP `status` and
+  `run_image` (disk and RAM); and, last because it empties the scratch
+  cache, the prune of image disks and disk boot archives with back-dated
+  files; and (`DEVBOX_E2E_VM=1`) a light-profile full VM from create to SSH
+  and stop (`DEVBOX_E2E_VM_TCG=1`: also under forced TCG), and a full VM's
+  shares both ways, read-only, after a reboot inside the VM and shared by a
+  second VM. `DEVBOX_E2E_REPORT` writes the measurements to a file, and
+  `DEVBOX_E2E_BIG=0` skips the synthetic image. The 2.1 run took 322 s for
+  the microVM cases and 212 s for the full-VM cases. It ends only the QEMUs
+  whose command line names its scratch root. Not in it: the
+  kernel setup (it downloads), smp-2 (more than 1 vCPU is still clamped on
+  microvm) and the s6/systemd fallback (needs an unapproved image).
 
 Further end-to-end runs are scripts outside the suite. They drive a real
 manager over the HTTP API and the MCP server:

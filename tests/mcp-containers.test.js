@@ -385,15 +385,173 @@ test('run_image (wait_for ready): a microVM by default, temporary, created by cl
   assert.deepEqual(r.urls, [{ url: 'http://127.0.0.1:8080', host_port: 8080, container_port: 80, lan: false, reachable_from: 'this PC only' }]);
   assert.equal(r.memory_mb, 256);
   assert.equal(r.accel, 'whpx');
-  assert.match(r.note, /RAM/);
+  // no rootfs sent: the manager's default applies (disk), and the note says
+  // what happens to the container's files on the disk root
+  assert.equal(r.rootfs, 'disk');
+  assert.match(r.note, /writable layer across stops and restarts.*removed \(remove_container\)/);
   assert.match(r.next, /image_logs.*stop_image.*remove_container/);
 });
 
-// the manager refuses less than 128 MB (validate.runFields): the schema must
-// not advertise a smaller minimum that only fails later with a 400
-test('run_image memory_mb: the schema minimum is the manager\'s (128 MB)', () => {
+// the manager refuses less than 96 MB for a disk root (validate.runFields;
+// 128 for rootfs "ram"): the schema must not advertise a smaller minimum
+// that only fails later with a 400
+test('run_image memory_mb: the schema minimum is the manager\'s (96 MB, the disk-root floor)', () => {
   const t = T.createTools({ connect: async () => null }).find((x) => x.name === 'run_image');
-  assert.equal(t.params.memory_mb.minimum, 128);
+  assert.equal(t.params.memory_mb.minimum, 96);
+  assert.match(t.params.memory_mb.description, /128 MB.*whatever the image size.*rootfs="ram": at least 128/);
+});
+
+// ---------------------------------------------------------------------------
+// the root filesystem choice (SPEC-diskroot section 9)
+// ---------------------------------------------------------------------------
+test('run_image / deploy_image rootfs: "disk" (default) | "ram" in both schemas, descriptions say what persists', () => {
+  const tools = T.createTools({ connect: async () => null });
+  const run = tools.find((x) => x.name === 'run_image');
+  const dep = tools.find((x) => x.name === 'deploy_image');
+  for (const t of [run, dep]) {
+    assert.deepEqual(t.params.rootfs.enum, ['disk', 'ram'], t.name);
+    assert.equal(t.params.rootfs.default, undefined, t.name + ': omitted = the manager\'s default, never a client-side one');
+    assert.equal(t.params.rootfs.required, undefined);
+    assert.match(t.params.rootfs.description, /"disk" \(the default\).*128 MB of RAM whatever the image size.*persist across restarts until the container is removed/, t.name);
+    assert.match(t.params.rootfs.description, /"ram".*resets at every start.*only when the user asks/, t.name);
+  }
+  assert.match(dep.params.rootfs.description, /microVM only: ignored when it runs with Docker inside a full VM/);
+  assert.match(run.description, /rootfs="disk".*persist across restarts and go when it is removed/);
+  assert.doesNotMatch(run.description, /lives in RAM and is reset every time/);
+  assert.match(T.INSTRUCTIONS, /persist across restarts of the same container and go when it is removed/);
+  assert.doesNotMatch(T.INSTRUCTIONS, /root filesystem lives in RAM and resets at every start/);
+  const stop = tools.find((x) => x.name === 'stop_image');
+  assert.match(stop.description, /default disk root its files are kept too.*rootfs="ram" loses everything/);
+});
+
+test('run_image rootfs: passed through as the manager\'s rootfs field; RAM roots say their files go at stop; bad values refused by the schema', async () => {
+  const m = fakeManager({ run: { record: { rootfs: 'ram', runtime: { pid: 4242, memMB: 288, accel: 'whpx', effectiveAccel: 'whpx', rootfs: 'ram' } } } });
+  const tools = toolsFor(m);
+  const r = await tools.call('run_image', { image: 'nginx:alpine', rootfs: 'ram' });
+  assert.equal(posts(m, '/api/container/run')[0][2].rootfs, 'ram');
+  assert.equal(r.rootfs, 'ram');
+  assert.match(r.note, /root filesystem lives in RAM \(rootfs="ram"\): changes outside named volumes and shared folders are gone after it stops/);
+  await assert.rejects(tools.call('run_image', { image: 'nginx:alpine', rootfs: 'tmpfs' }), (e) => e.isError && /rootfs/.test(e.message));
+  assert.equal(posts(m, '/api/container/run').length, 1, 'a bad value never reaches the manager');
+  const d = fakeManager({ run: { record: { rootfs: 'disk' }, polls: [{ status: 'exited', exitCode: 0 }] } });
+  const x = await toolsFor(d).call('run_image', { image: 'alpine', rootfs: 'disk', command: ['true'], wait_for: 'exit', timeout_s: 30 });
+  assert.equal(posts(d, '/api/container/run')[0][2].rootfs, 'disk');
+  // the exit result names it too
+  assert.equal(x.status, 'exited');
+  assert.equal(x.rootfs, 'disk');
+  assert.equal(K.runBody({ image: 'x', rootfs: undefined }, null, () => [], 'mcp').rootfs, undefined);
+});
+
+test('deploy_image rootfs: sent to the microVM route only - the Docker-in-VM body never carries it', async () => {
+  const m = fakeManager();
+  const r = await toolsFor(m).call('deploy_image', { image: 'nginx:alpine', rootfs: 'ram' });
+  assert.equal(r.engine, 'microvm');
+  assert.equal(posts(m, '/api/container/run')[0][2].rootfs, 'ram');
+  const v = fakeManager();
+  await toolsFor(v).call('deploy_image', { image: 'nginx:alpine', engine: 'docker-vm', rootfs: 'disk' });
+  const qd = posts(v, '/api/vm/quickdeploy')[0][2];
+  assert.equal('rootfs' in qd, false);
+  assert.equal(posts(v, '/api/container/run').length, 0);
+});
+
+test('deploy_image memory_mb: a disk-root microVM may ask for 96-255 MB; a full VM needs 256 (refused for docker-vm, dropped on an auto fallback)', async () => {
+  const dep = T.createTools({ connect: async () => null }).find((x) => x.name === 'deploy_image');
+  assert.equal(dep.params.memory_mb.minimum, 96, 'the manager\'s floor for a disk root');
+  const m = fakeManager();
+  await toolsFor(m).call('deploy_image', { image: 'nginx:alpine', memory_mb: 128 });
+  assert.equal(posts(m, '/api/container/run')[0][2].mem, 128);
+  // auto, the microVM said no: the small value was for the microVM - the VM gets its default
+  const f = fakeManager({ run: { record: { status: 'error', fallback: { engine: 'docker-vm', code: 'LARGE_IMAGE', reason: 'large' } }, task: { status: 'error', error: 'not compatible' } } });
+  await toolsFor(f).call('deploy_image', { image: 'big/app', memory_mb: 128 });
+  assert.equal('mem' in posts(f, '/api/vm/quickdeploy')[0][2], false);
+  const f2 = fakeManager({ run: { record: { status: 'error', fallback: { engine: 'docker-vm', code: 'LARGE_IMAGE', reason: 'large' } }, task: { status: 'error', error: 'not compatible' } } });
+  await toolsFor(f2).call('deploy_image', { image: 'big/app', memory_mb: 3072 });
+  assert.equal(posts(f2, '/api/vm/quickdeploy')[0][2].mem, 3072);
+  // a full VM asked for explicitly: below 256 is refused before anything starts
+  const v = fakeManager();
+  await assert.rejects(toolsFor(v).call('deploy_image', { image: 'nginx:alpine', engine: 'docker-vm', memory_mb: 128 }), /too small for a full VM.*at least 256/);
+  await assert.rejects(toolsFor(v).call('deploy_image', { image: 'nginx:alpine', privileged: true, memory_mb: 200 }), /too small for a full VM/);
+  assert.equal(posts(v, '/api/vm/quickdeploy').length, 0);
+});
+
+test('list_containers / status / list_images: the root filesystem, the writable layer and the image disk', async () => {
+  const m = fakeManager({
+    images: { images: [{ references: ['docker.io/library/nginx:alpine'], configDigest: 'sha256:' + 'a'.repeat(64), compressedBytes: 20 * 1048576, rootfsBytes: 61 * 1048576, diskBytes: 65 * 1048576 }], cacheBytes: 0 },
+  });
+  m.containers.set('abc000000001', { id: 'abc000000001', name: 'web', image: 'nginx:alpine', status: 'exited', exitCode: 0, rootfs: 'disk', rootDisk: { configDigest: 'sha256:x', overlayBytes: 2 * 1048576 }, ports: [] });
+  m.containers.set('abc000000002', { id: 'abc000000002', name: 'tmp', image: 'alpine', status: 'exited', exitCode: 0, rootfs: 'ram', ports: [] });
+  m.containers.set('abc000000003', { id: 'abc000000003', name: 'old', image: 'alpine', status: 'exited', exitCode: 0, ports: [] });
+  const tools = toolsFor(m);
+  const l = await tools.call('list_containers', {});
+  const by = {};
+  for (const c of l.containers) by[c.name] = c;
+  assert.equal(by.web.rootfs, 'disk');
+  assert.equal(by.web.writable_layer_mb, 2);
+  assert.equal(by.tmp.rootfs, 'ram');
+  assert.equal(by.tmp.writable_layer_mb, undefined);
+  assert.equal(by.old.rootfs, 'disk', 'a record without the field is a disk root (what its next start gives it)');
+  // the /api/state summaries carry rootDiskBytes instead
+  assert.equal(K.summarizeContainer({ id: 'x', name: 'x', rootfs: 'disk', rootDiskBytes: 524288 }).writable_layer_mb, 0.5);
+  assert.equal(K.rootfsOf({ rootfs: 'disk', runtime: { rootfs: 'ram' } }), 'ram', 'what it runs with beats the setting');
+  // status names it for every container (from the /api/state summaries)
+  const s = await tools.call('status', {});
+  assert.equal(s.containers.length, 3);
+  assert.ok(s.containers.every((c) => c.rootfs === 'disk' || c.rootfs === 'ram'));
+  const i = await tools.call('list_images', {});
+  assert.equal(i.images[0].image_disk_mb, 65);
+  // a disk-root image has no rootfs archive: its unpacked size comes from
+  // unpackedBytes (cov-1)
+  const m2 = fakeManager({ images: { images: [{ references: ['docker.io/library/redis:alpine'], configDigest: 'sha256:' + 'b'.repeat(64), compressedBytes: 10 * 1048576, rootfsBytes: null, unpackedBytes: 30 * 1048576, diskBytes: 33 * 1048576 }], cacheBytes: 0 } });
+  const i2 = await toolsFor(m2).call('list_images', {});
+  assert.deepEqual([i2.images[0].unpacked_mb, i2.images[0].image_disk_mb], [30, 33]);
+  // a container QEMU paused for a full disk says so (cr-6)
+  assert.equal(K.summarizeContainer({ id: 'x', name: 'x', status: 'running', paused: 'paused by QEMU: the disk of this PC is full' }).paused, 'paused by QEMU: the disk of this PC is full');
+  assert.equal(K.summarizeContainer({ id: 'x', name: 'x', status: 'running', paused: { at: 'now', reason: 'paused by QEMU: full' } }).paused, 'paused by QEMU: full');
+  assert.equal(K.summarizeContainer({ id: 'x', name: 'x', status: 'running' }).paused, undefined);
+});
+
+test('status: the container defaults, the light profile and - without acceleration - the steps to enable it', async () => {
+  // a manager with the engine settings and microvm.defaults
+  const hint = {
+    accel: 'tcg', insideVm: true, outer: 'hyper-v', outerLabel: 'Hyper-V', summary: 'No hardware acceleration: ... This PC is itself a virtual machine (Hyper-V).',
+    fix: 'x', steps: { 'hyper-v': ['On the outer Hyper-V host: `Set-VMProcessor -VMName "<VM name>" -ExposeVirtualizationExtensions $true`.'] }, labels: { 'hyper-v': 'Hyper-V' },
+    inner: ['Then, on this Windows: turn on "Windows Hypervisor Platform".'], readme: 'README.md, section "Running inside another VM"',
+  };
+  const m = fakeManager({
+    state: {
+      settings: { accel: 'auto', defaultExpose: 'local', lightProfile: true, microvmRootfs: 'disk', microvmMemMB: 112, tcgTbSizeMB: 64 },
+      microvm: { ready: true, kver: '6.18.54-0-virt', accel: 'tcg', machine: 'microvm', reason: null, needsUpdate: false,
+        defaults: { rootfs: 'disk', memMB: 112, minMemMB: 96, ramMinMemMB: 128, tcgTbSizeMB: 64 } },
+      accelHint: hint,
+    },
+  });
+  const s = await toolsFor(m).call('status', {});
+  assert.equal(s.light_profile, true);
+  assert.deepEqual(s.microvm_defaults, { rootfs: 'disk', memory_mb: 112, min_memory_mb: 96, min_memory_mb_ram: 128, tcg_cache_mb: 64 });
+  assert.equal(s.accel_hint.inside_vm, true);
+  assert.equal(s.accel_hint.outer_hypervisor, 'Hyper-V');
+  assert.match(s.accel_hint.steps[0], /^Hyper-V: .*Set-VMProcessor/);
+  assert.match(s.accel_hint.then_on_this_pc[0], /Windows Hypervisor Platform/);
+  assert.match(s.accel_hint.more, /Running inside another VM/);
+  assert.match(s.accel_hint.tell_the_user, /user/);
+  // with acceleration, an older manager: nothing invented
+  const o = await toolsFor(fakeManager()).call('status', {});
+  assert.equal(o.accel_hint, undefined);
+  assert.equal(o.light_profile, undefined);
+  assert.equal(o.microvm_defaults, undefined);
+  // only the settings (no microvm.defaults): taken from them
+  const p = await toolsFor(fakeManager({ state: { settings: { lightProfile: false, microvmRootfs: 'ram', microvmMemMB: 128, tcgTbSizeMB: 128 } } })).call('status', {});
+  assert.deepEqual(p.microvm_defaults, { rootfs: 'ram', memory_mb: 128, min_memory_mb: 96, min_memory_mb_ram: 128, tcg_cache_mb: 128 });
+  assert.equal(p.light_profile, false);
+});
+
+test('the new engine errors say what to do next', () => {
+  const e = (code, msg) => { const x = new Error(msg); x.status = 409; x.code = code; return T.apiFail(x); };
+  assert.match(e('IMAGE_GONE', 'the image this container was created from is no longer in the cache').message, /remove_container.*run_image/);
+  assert.match(e('ROOT_DISK_MISSING', 'the image disk is gone').message, /remove_container/);
+  assert.match(e('NO_SPACE', 'not enough free disk space').message, /remove_container, remove_image/);
+  const s = new Error('mem too small'); s.status = 400; s.code = 'MEMORY_TOO_SMALL';
+  assert.match(T.apiFail(s).message, /at least 96 MB for the default disk root, 128 for rootfs="ram"/);
 });
 
 test('run_image (wait_for exit): exit code + separate stdout/stderr; remove_on_exit removes AFTER reading the output', async () => {

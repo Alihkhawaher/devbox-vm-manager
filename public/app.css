@@ -337,3 +337,16 @@ td .urls{display:flex;gap:4px 10px;flex-wrap:wrap;margin-top:3px}
 .modal .radios{display:flex;flex-direction:column;gap:6px}
 .copyrow{display:flex;gap:8px;align-items:flex-start}
 .copyrow pre,.copyrow input{flex:1}
+.g-2{grid-template-columns:repeat(2,1fr)}
+@media(max-width:700px){.g-2{grid-template-columns:1fr}}
+
+/* ---- light profile table, acceleration hint ---- */
+.lptable td{font-size:12.5px;padding:6px 10px}
+.lptable td:first-child{color:var(--muted)}
+.ahint{font-size:12.5px;color:var(--muted);line-height:1.5}
+.ahint .ahint-sum{margin:6px 0 8px}
+.ahint .ahead{font-weight:650;color:var(--fg);margin-top:10px}
+.ahint .asteps{margin:4px 0 0;padding-left:20px}
+.ahint .asteps li{margin:3px 0;overflow-wrap:anywhere}
+.ahint code{white-space:pre-wrap;word-break:break-word}
+#accelRow{gap:10px;flex-wrap:wrap}

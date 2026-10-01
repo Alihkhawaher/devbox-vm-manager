@@ -255,6 +255,9 @@ async function main(argv) {
   // and re-mounted), then autostart - each VM and container as a task.
   if (q) {
     platform.detectAccel(q).then((a) => { if (a && a.recommended === 'whpx') vm.whpxCpuModel().catch(() => {}); }).catch(() => {});
+    // which machine this is (an outer hypervisor?), asked beside the 2.5 s
+    // probe: the first TCG hint then already names it (cov-9)
+    try { install.prefetchVendor(); } catch (e) { /* best effort */ }
   }
   (async () => {
     // registries and their backups written by an earlier version inherited

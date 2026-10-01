@@ -182,14 +182,19 @@ test('prepareImage: flatten warnings reach the task log once (bug V10); the root
   const root = useTempRoot('prep');
   try {
     const t0 = quietT();
-    await assert.rejects(run.prepareImage('vwarn', { pull: 'never', t: t0 }), (e) => e.code === 'NO_KERNEL' && e.status === 409);
+    // the root file system is the caller's choice, never a default here (cov-2)
+    await assert.rejects(run.prepareImage('vwarn', { pull: 'never', t: t0 }), (e) => e.code === 'BAD_ROOTFS' && /rootfs must be/.test(e.message));
+    await assert.rejects(run.prepareImage('vwarn', { pull: 'never', t: t0, rootfs: 'tmpfs' }), (e) => e.code === 'BAD_ROOTFS');
+    await assert.rejects(run.prepareImage('vwarn', { pull: 'never', t: t0, rootfs: 'ram' }), (e) => e.code === 'NO_KERNEL' && e.status === 409);
     fakeKernel();
     fs.mkdirSync(CFG.imagesDir, { recursive: true });
     fs.writeFileSync(path.join(CFG.imagesDir, 'refs.json'), '{}');
     // a dangling hard link: flattening skips it with a warning
     putLocalImage(CFG.imagesDir, 'vwarn', { layers: [{ tar: tarBuffer([{ path: 'app', type: 'file', data: 'x' }, { path: 'lost', type: 'hardlink', linkpath: 'nowhere' }]) }], config: { Cmd: ['/app'] } });
     const t = quietT();
-    const p = await run.prepareImage('vwarn', { pull: 'never', t });
+    const claimed = [];
+    const p = await run.prepareImage('vwarn', { pull: 'never', t, rootfs: 'ram', onRoot: (r) => claimed.push(r) });
+    assert.deepStrictEqual(claimed, [{ initrd: p.initrd }], 'the initrd is claimed inside the image lock (cr-1)');
     assert.ok(p.warnings.some((w) => /hardlink lost -> nowhere/.test(w)), JSON.stringify(p.warnings));
     assert.ok(t.lines.some((l) => /^WARN image: .*hardlink lost -> nowhere/.test(l)), t.lines.join('\n'));
     assert.deepStrictEqual(p.runtime.argv, ['/app']);
@@ -203,17 +208,17 @@ test('prepareImage: flatten warnings reach the task log once (bug V10); the root
     assert.ok(idx.lastUsed && idx.initrd.key === p.initrdKey && idx.warnings === 1);
     // warm: the cached initrd, no second flatten, warnings not logged again
     const t2 = quietT();
-    const q = await run.prepareImage('vwarn', { pull: 'never', t: t2 });
+    const q = await run.prepareImage('vwarn', { pull: 'never', t: t2, rootfs: 'ram' });
     assert.deepStrictEqual([q.cached.initrd, q.initrd], [true, p.initrd]);
     assert.ok(!t2.lines.some((l) => /^WARN/.test(l)), t2.lines.join('\n'));
     assert.ok(!fs.existsSync(rp.archive));
     // concurrent runs of the same image build once (image lock)
     fs.rmSync(p.initrd);
-    const rs = await Promise.all([0, 1, 2].map(() => run.prepareImage('vwarn', { pull: 'never' })));
+    const rs = await Promise.all([0, 1, 2].map(() => run.prepareImage('vwarn', { pull: 'never', rootfs: 'ram' })));
     assert.strictEqual(rs.filter((r) => !r.cached.initrd).length, 1, 'one build, two cache hits');
     // an aborted signal stops before any work
     const ac = new AbortController(); ac.abort();
-    await assert.rejects(run.prepareImage('vwarn', { pull: 'never', signal: ac.signal }), (e) => e.code === 'ABORTED');
+    await assert.rejects(run.prepareImage('vwarn', { pull: 'never', signal: ac.signal, rootfs: 'ram' }), (e) => e.code === 'ABORTED');
   } finally { resetConfig(); rm(root); }
 });
 

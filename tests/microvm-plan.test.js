@@ -305,3 +305,69 @@ test('host facts under TCG: a TSC frequency (reused from the hardware facts, els
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('planRun, disk root: the overlay is the FIRST drive (id root, serial devbox-root, rw); 128 MB whatever the image; floor 96; copy-in costs no RAM', () => {
+  const dir = tmp('diskroot');
+  const prev = CFG.microvmMemMB;
+  try {
+    const manifest = fakeKernel(dir);
+    const spec = plan.buildSpec({ cmd: ['/bin/app'] }, { rootfs: 'disk', volumes: [{ target: '/data' }] });
+    assert.strictEqual(spec.rootfs, 'disk');
+    assert.strictEqual(plan.buildSpec({ cmd: ['x'] }, {}).rootfs, 'ram', 'pure default: RAM (the calibration boot has no root disk)');
+    const ov = path.join(dir, 'microvms', 'abcdefabcdef', 'root.qcow2');
+    const base = {
+      kernelDir: dir, manifest, initrd: path.join(dir, 'disk-x.initrd'), runDir: path.join(dir, 'run'), spec, machine: 'q35', accel: 'tcg',
+      volumes: [{ file: path.join(dir, 'v.qcow2') }],
+      rootDisk: { file: ov, backing: path.join(dir, 'images', 'disks', 'x.qcow2'), backingRel: '../../images/disks/x.qcow2' },
+    };
+    // a big "initrd" would make a RAM root need GBs: a disk root ignores it
+    fs.writeFileSync(base.initrd, Buffer.alloc(8 * 1048576));
+    const p = plan.planRun(Object.assign({}, base, { extraMemMB: 500 }));
+    const vals = (flag) => p.args.map((x, i) => (x === flag ? p.args[i + 1] : null)).filter((x) => x !== null);
+    const drives = vals('-drive');
+    assert.strictEqual(drives[0], 'file=' + ov + ',if=none,id=root,format=qcow2,cache=writeback,discard=unmap');
+    assert.ok(drives[1].includes('id=vol0'), 'volumes after the root disk');
+    assert.ok(vals('-device').includes('virtio-blk-pci,drive=root,serial=devbox-root'));
+    assert.strictEqual(p.memMB, 128);
+    assert.ok(/^DEVBOX_ROOT=disk$/m.test(p.specText));
+    assert.ok(/DEVBOX_MODULES='[^']*virtio_blk/.test(p.specText));
+    CFG.microvmMemMB = 112; // the light profile
+    assert.strictEqual(plan.planRun(base).memMB, 112);
+    assert.strictEqual(plan.recommendedDiskMemMB(), 112);
+    CFG.microvmMemMB = 50; // nonsense: the default
+    assert.strictEqual(plan.recommendedDiskMemMB(), 128);
+    assert.strictEqual(plan.planRun(Object.assign({}, base, { memMB: 96 })).memMB, 96);
+    assert.throws(() => plan.planRun(Object.assign({}, base, { memMB: 90 })), (e) => e.code === 'MEMORY_TOO_SMALL' && /96/.test(e.message));
+    assert.throws(() => plan.planRun(Object.assign({}, base, { rootDisk: undefined })), /needs o.rootDisk/);
+    assert.throws(() => plan.planRun(Object.assign({}, base, { spec: plan.buildSpec({ cmd: ['x'] }, {}) , volumes: [] })), /only for a disk-root spec/);
+  } finally { CFG.microvmMemMB = prev; fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('recommendedMemMB: the RAM root boots at 2.2 x the initrd + 90 (612 MB panicked at 2 x + 90)', () => {
+  const MB = 1048576;
+  assert.ok(plan.recommendedMemMB(612 * MB, 0) >= 1435, String(plan.recommendedMemMB(612 * MB, 0)));
+  assert.ok(plan.recommendedMemMB(612 * MB, 0) <= 1456);
+  assert.strictEqual(plan.DISK_MIN_MEM_MB, 96);
+  assert.strictEqual(plan.RAM_MIN_MEM_MB, 128);
+});
+
+test('diskMemHint: databases, JVMs and search engines get a higher disk-root default, by program or environment; ramAutoMemMB (cr-3)', () => {
+  const h = (rt, over) => plan.diskMemHint(rt, over);
+  assert.deepEqual(h({ cmd: ['mysqld'], env: ['MYSQL_MAJOR=8.4'] }), { what: 'MySQL/MariaDB', memMB: 512 });
+  assert.deepEqual(h({ entrypoint: ['docker-entrypoint.sh'], cmd: ['mariadbd'] }), { what: 'MySQL/MariaDB', memMB: 512 });
+  assert.deepEqual(h({ cmd: ['mongod'] }), { what: 'MongoDB', memMB: 512 });
+  assert.deepEqual(h({ cmd: ['postgres'], env: ['PG_MAJOR=16'] }), { what: 'PostgreSQL', memMB: 256 });
+  assert.deepEqual(h({ cmd: ['catalina.sh', 'run'], env: ['JAVA_HOME=/opt/java/openjdk'] }), { what: 'a Java (JVM) app', memMB: 512 });
+  assert.deepEqual(h({ entrypoint: ['/usr/bin/java', '-jar', 'app.jar'] }), { what: 'a Java (JVM) app', memMB: 512 });
+  assert.deepEqual(h({ entrypoint: ['/bin/tini', '--', '/usr/local/bin/docker-entrypoint.sh'], cmd: ['eswrapper'], env: ['ELASTIC_CONTAINER=true', 'JAVA_HOME=/x'] }), { what: 'Elasticsearch/OpenSearch', memMB: 1024 });
+  assert.equal(h({ cmd: ['nginx', '-g', 'daemon off;'], env: ['NGINX_VERSION=1.27'] }), null);
+  assert.equal(h({ cmd: ['python3'] }), null);
+  assert.equal(h(null), null);
+  // the run's own command counts (Docker's rules: an entrypoint drops CMD)
+  assert.deepEqual(h({ cmd: ['sh'] }, { cmd: ['postgres', '-c', 'fsync=off'] }), { what: 'PostgreSQL', memMB: 256 });
+  assert.equal(h({ cmd: ['mysqld'] }, { entrypoint: ['sh'] }), null);
+  const MB = 1048576;
+  assert.equal(plan.ramAutoMemMB(0), 256);
+  assert.equal(plan.ramAutoMemMB(20 * MB), 256);
+  assert.equal(plan.ramAutoMemMB(150 * MB), Math.max(256, plan.recommendedMemMB(150 * MB)));
+});

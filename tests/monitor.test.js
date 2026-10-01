@@ -218,3 +218,13 @@ test('addForwardLive refuses VMs without a monitor or adopted from v1', async ()
   assert.equal(legacy.ok, false);
   assert.match(legacy.why, /restart it once/);
 });
+
+test('parseStatus: running, paused for an I/O error (a full host disk), other states; null for junk (cr-6)', () => {
+  const monitor = require('../lib/monitor');
+  assert.deepEqual(monitor.parseStatus('VM status: running'), { running: true, status: 'running', reason: null });
+  assert.deepEqual(monitor.parseStatus('VM status: paused (io-error)\r\n'), { running: false, status: 'paused', reason: 'io-error' });
+  assert.deepEqual(monitor.parseStatus('VM status: paused'), { running: false, status: 'paused', reason: null });
+  assert.deepEqual(monitor.parseStatus('VM status: paused (shutdown)').reason, 'shutdown');
+  assert.equal(monitor.parseStatus(''), null);
+  assert.equal(monitor.parseStatus('unknown command'), null);
+});

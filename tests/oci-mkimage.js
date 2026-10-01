@@ -51,7 +51,7 @@ function paxRecord(key, value) {
 
 const pad = (n) => Buffer.alloc((512 - (n % 512)) % 512);
 
-// entries: {path, type: 'file'|'dir'|'symlink'|'hardlink', data, mode, linkpath}
+// entries: {path, type: 'file'|'dir'|'symlink'|'hardlink', data, mode, linkpath, uid, gid, mtime}
 function tarBuffer(entries) {
   const parts = [];
   for (const e of entries) {
@@ -66,7 +66,7 @@ function tarBuffer(entries) {
       const pb = Buffer.from(pax, 'utf8');
       parts.push(header('PaxHeaders/x', { mode: 0o644, size: pb.length, typeflag: 'x' }), pb, pad(pb.length));
     }
-    parts.push(header(name, { mode: e.mode != null ? e.mode : (e.type === 'dir' ? 0o755 : e.type === 'symlink' ? 0o777 : 0o644), size: data.length, typeflag: tf, linkname: link }));
+    parts.push(header(name, { mode: e.mode != null ? e.mode : (e.type === 'dir' ? 0o755 : e.type === 'symlink' ? 0o777 : 0o644), size: data.length, typeflag: tf, linkname: link, uid: e.uid, gid: e.gid, mtime: e.mtime }));
     if (data.length) parts.push(data, pad(data.length));
   }
   parts.push(Buffer.alloc(1024));

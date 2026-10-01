@@ -169,3 +169,12 @@ test('devbox_mounts: volumes and shared folders in ONE list, parents before chil
   assert.deepStrictEqual(out, ['V[vol2|/a]', 'S[abc-1|/app]', 'V[vol0|/app/node_modules]', 'V[vol1|/a/b]']);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('disk root in the spec: DEVBOX_ROOT, blk + ext4 for the root disk (ram by default)', () => {
+  const manifest = { features: { net: ['virtio_net'], blk: ['virtio_blk'], ext4: ['crc16', 'ext4'], rng: [] } };
+  assert.match(initramfs.renderSpec({ argv: ['x'] }), /^DEVBOX_ROOT=ram$/m);
+  assert.match(initramfs.renderSpec({ argv: ['x'], rootfs: 'disk' }), /^DEVBOX_ROOT=disk$/m);
+  assert.match(initramfs.renderSpec({ argv: ['x'], rootfs: 'anything' }), /^DEVBOX_ROOT=ram$/m);
+  assert.deepStrictEqual(initramfs.specFeatures({ argv: ['x'], net: false, rng: false, rootfs: 'disk' }), ['blk', 'ext4']);
+  assert.deepStrictEqual(initramfs.specModules({ argv: ['x'], net: false, rng: false, rootfs: 'disk', volumes: [{}] }, manifest), ['virtio_blk', 'crc16', 'ext4']);
+});

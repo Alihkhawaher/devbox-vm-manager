@@ -67,12 +67,15 @@ if (err) fs.writeFileSync(err, '');
 process.stdout.write('qemu-system-x86_64: info: Windows Hypervisor Platform accelerator is operational\n');
 if (env.FAKE_RECORD) fs.writeFileSync(env.FAKE_RECORD, JSON.stringify({ args, fw, specText }));
 let readerOn = false, appRunning = false, stopping = false, exited = false;
+let fakePaused = !!env.FAKE_PAUSED;
 const TERM = env.FAKE_TERM || 'exit';
 const STUCK = env.FAKE_STUCK || '';
 function exit(code, nostart) {
   if (exited) return;
   exited = true;
   if (nostart) w('__DEVBOX_NOSTART\n');
+  // like init's oom_marker: the OOM kills of the boot, just before EXIT
+  if (env.FAKE_OOM) w('__DEVBOX_OOM=' + env.FAKE_OOM + '\n');
   w('__DEVBOX_EXIT=' + code + '\n');
   setTimeout(() => process.exit(0), 60);
 }
@@ -108,6 +111,9 @@ if (mon) {
       if (c === 'quit') { w('[fake] quit\n'); s.end(); setTimeout(() => process.exit(0), 20); return; }
       // like QEMU: the -name it was started with (the identity check)
       if (c === 'info name') { s.write(c + '\r\n' + (all('-name')[0] || '') + '\r\n(qemu) '); return; }
+      // FAKE_PAUSED: QEMU paused the guest for a full disk (werror=enospc)
+      if (c === 'info status') { s.write(c + '\r\nVM status: ' + (fakePaused ? 'paused (io-error)' : 'running') + '\r\n(qemu) '); return; }
+      if (c === 'cont') { fakePaused = false; s.write(c + '\r\n(qemu) '); return; }
       if (c === 'system_powerdown' && readerOn) onCmd('__DEVBOX_STOP');
       s.write(c + '\r\n(qemu) ');
     });
@@ -127,6 +133,8 @@ for (const f of fwds) net.createServer((s) => { if (!(appRunning && env.FAKE_LIS
 // no marker, no reader - only the monitor's quit ends it
 if (!env.FAKE_HANG) setTimeout(() => {
   w('[    0.10] Linux version fake\n__DEVBOX_INIT uptime=0.10\n');
+  // a disk root: stage 2 starts on the root disk after switch_root
+  if (/^DEVBOX_ROOT=disk$/m.test(specText)) w('__DEVBOX_ROOT uptime=0.12\n');
   setTimeout(() => { readerOn = true; }, num('FAKE_READER_MS', 0));
   setTimeout(() => {
     if (env.FAKE_INIT_ERROR) { w('devbox-init: ' + env.FAKE_INIT_ERROR + '\n__DEVBOX_ERROR=' + env.FAKE_INIT_ERROR + '\n'); exit(125); return; }
@@ -147,20 +155,39 @@ let fakeScript;
 const spawned = [];
 const orig = {};
 let prepHook = null;
+const rootCalls = [];
 
 function fakeKernel() {
   const dir = path.join(CFG.kernelDir, '1.0.0-0-virt');
   fs.mkdirSync(path.join(dir, 'modules'), { recursive: true });
-  for (const f of ['busybox.static', 'vmlinuz-virt', 'modules/virtio_net.ko', 'modules/9p.ko']) fs.writeFileSync(path.join(dir, f), 'X');
+  const mods = ['virtio_net', '9p', 'virtio_blk', 'ext4', 'qemu_fw_cfg'];
+  for (const f of ['busybox.static', 'vmlinuz-virt'].concat(mods.map((m) => 'modules/' + m + '.ko'))) fs.writeFileSync(path.join(dir, f), 'X');
   const manifest = {
-    kver: '1.0.0-0-virt', modules: { virtio_net: { file: 'modules/virtio_net.ko' }, '9p': { file: 'modules/9p.ko' } },
-    features: { net: ['virtio_net'], ninep: ['9p'] }, sha256: { 'busybox.static': 'x' },
+    kver: '1.0.0-0-virt', modules: Object.fromEntries(mods.map((m) => [m, { file: 'modules/' + m + '.ko' }])),
+    features: { net: ['virtio_net'], ninep: ['9p'], blk: ['virtio_blk'], ext4: ['ext4'], fwcfg: ['qemu_fw_cfg'] }, sha256: { 'busybox.static': 'x' },
   };
   fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest));
   return { dir, manifest };
 }
 
-// run.prepareImage stand-in: an "image" whose runtime the test chooses
+// run.prepareImage stand-in: an "image" whose runtime the test chooses;
+// a disk root gets a stand-in image disk (QEMU is fake: any file will do)
+const FAKE_CD = 'sha256:' + 'a'.repeat(64);
+function fakeDisk() {
+  const file = path.join(CFG.imagesDir, 'disks', 'aaaaaaaaaaaa-1111111111111111.qcow2');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (!fs.existsSync(file)) fs.writeFileSync(file, Buffer.alloc(65536));
+  fs.writeFileSync(file + '.json', JSON.stringify({ version: 1, configDigest: FAKE_CD, key: '1111111111111111', virtualBytes: 8 * 1073741824, facts: { passwd: null, group: null, s6: false }, runtime: {} }));
+  return file;
+}
+function fakeDiskPrep(k, runtime) {
+  const p = fakePrep(k, runtime);
+  return Object.assign(p, {
+    rootfs: 'disk', disk: fakeDisk(), diskKey: '1111111111111111', diskBytes: 65536, virtualBytes: 8 * 1073741824, unpackedBytes: 4096,
+    facts: { passwd: null, group: null, s6: false }, initrd: null, initrdBytes: null, initrdKey: null, cached: { image: true, disk: true },
+    timings: { pullMs: 1, diskMs: 0 },
+  });
+}
 function fakePrep(k, runtime) {
   const initrd = path.join(CFG.imagesDir, 'initrd', 'aaaaaaaaaaaa-0000000000000000.initrd');
   fs.mkdirSync(path.dirname(initrd), { recursive: true });
@@ -168,7 +195,7 @@ function fakePrep(k, runtime) {
   return {
     reference: 'docker.io/library/fake:latest', familiar: 'fake', configDigest: 'sha256:' + 'a'.repeat(64), manifestDigest: 'sha256:' + 'b'.repeat(64),
     runtime: Object.assign({ entrypoint: [], cmd: ['/app'], env: ['PATH=/bin'], workingDir: '/', user: '', exposedPorts: [], stopSignal: null, volumes: [], labels: {} }, runtime || {}),
-    initrd, initrdBytes: 4096, initrdKey: '0000000000000000', rootfsBytes: 4096, kernelDir: k.dir, manifest: k.manifest,
+    rootfs: 'ram', initrd, initrdBytes: 4096, initrdKey: '0000000000000000', rootfsBytes: 4096, kernelDir: k.dir, manifest: k.manifest,
     compressedBytes: 1000, downloadedBytes: 0, rateLimit: null, warnings: [], config: {}, cached: { image: true, initrd: true },
     timings: { pullMs: 1, flattenMs: 0, initrdMs: 0 },
   };
@@ -188,14 +215,20 @@ before(() => {
   fs.writeFileSync(fakeScript, FAKE_QEMU);
   Object.assign(orig, {
     findTool: platform.findTool, detectAccel: platform.detectAccel, listQemuPids: platform.listQemuPids,
-    prepareImage: run.prepareImage, hostFacts: run.hostFacts, launch: run.launch,
+    prepareImage: run.prepareImage, prepareRootByDigest: run.prepareRootByDigest, hostFacts: run.hostFacts, launch: run.launch,
   });
   platform.findTool = (n) => (n === 'qemu' ? path.join(CFG.root, 'qemu-system-x86_64') : orig.findTool(n));
   platform.detectAccel = async () => ({ available: ['tcg'], recommended: 'tcg' });
   run.prepareImage = async (ref, o) => {
     if (prepHook) await prepHook(ref, o);
     if (o && o.signal && o.signal.aborted) throw Object.assign(new Error('stopped before the app started'), { code: 'ABORTED' });
-    return fakePrep(K, (prepHook && prepHook.runtime) || null);
+    const rt = (prepHook && prepHook.runtime) || null;
+    return o && o.rootfs === 'disk' ? fakeDiskPrep(K, rt) : fakePrep(K, rt);
+  };
+  run.prepareRootByDigest = async (cd, o) => {
+    rootCalls.push({ cd, disk: o && o.disk });
+    if (prepHook) await prepHook(cd, o);
+    return Object.assign(fakeDiskPrep(K, (prepHook && prepHook.runtime) || null), { reference: null, configDigest: cd });
   };
   run.hostFacts = async () => ({ machines: ['microvm', 'q35'], tscKhz: 2000000, accel: 'tcg' });
   run.launch = (o) => orig.launch(Object.assign({}, o, {
@@ -214,7 +247,7 @@ after(async () => {
   for (const c of spawned) { try { c.kill(); } catch (e) { /* gone */ } }
   containers.shutdown();
   Object.assign(platform, { findTool: orig.findTool, detectAccel: orig.detectAccel, listQemuPids: orig.listQemuPids });
-  Object.assign(run, { prepareImage: orig.prepareImage, hostFacts: orig.hostFacts, launch: orig.launch });
+  Object.assign(run, { prepareImage: orig.prepareImage, prepareRootByDigest: orig.prepareRootByDigest, hostFacts: orig.hostFacts, launch: orig.launch });
   try { await shares.shutdown(); } catch (e) { /* not started */ }
   tasks._reset();
   const root = CFG.root;
@@ -565,6 +598,11 @@ test('engines: request rules pick Docker-in-VM up front (auto), 409 for microvm;
   deploy.validateQuickDeploy = async (b) => { seen.push({ body: b, reserved: Array.from(require('../lib/ports').reservedPorts().keys()) }); return Object.assign({}, b, { name: 'vm-from-' + String(b.image).replace(/[^a-z]/g, ''), claimed: [] }); };
   deploy.opQuickDeploy = async () => ({ ok: true });
   try {
+    // a bad rootfs is a 400 on every engine, before anything is started (cov-7)
+    for (const b of [{ engine: 'docker-vm' }, { privileged: true }, { engine: 'microvm' }]) {
+      await assert.rejects(containers.runRoute(Object.assign({ image: 'nginx:alpine', rootfs: 'bogus' }, b)), (e) => e.status === 400 && /rootfs must be disk or ram/.test(e.message), JSON.stringify(b));
+    }
+    assert.equal(seen.length, 0);
     const auto = await containers.runRoute({ image: 'nginx:alpine', privileged: true, ports: ['18181:80,lan'], env: { A: '1' } });
     assert.equal(auto.engine, 'docker-vm');
     assert.match(auto.reason, /privileged/);
@@ -680,7 +718,7 @@ test('the runtime is saved the moment QEMU is spawned, before the start window e
     },
   }));
   try {
-    const c = await runC({});
+    const c = await runC({ rootfs: 'ram' });
     await waitTask(c.task.id);
     assert.equal(seen.length, 1);
     assert.equal(seen[0].rt && seen[0].rt.pid, seen[0].pid, 'recorded while launch() was still in its start window');
@@ -829,5 +867,273 @@ test('a Docker-in-VM fallback that fails gives the container its ports back (cor
     assert.ok(!/replaced by the Docker VM/.test(store.get(c.id).note || ''));
     await containers.removeRoute({ id: c.id });
   } finally { deploy.validateQuickDeploy = origV; deploy.opQuickDeploy = origOp; }
+});
+
+// ---------------------------------------------------------------------------
+// disk root (the default): the writable layer and its lifecycle
+// ---------------------------------------------------------------------------
+async function startC(id, body) {
+  const a = await containers.validateStart(Object.assign({ id }, body || {}));
+  const s = tasks.start({ kind: 'ctr-start', title: 'start', ctr: a.id, locks: ['ctr:' + a.id] }, (t) => containers.opStart(t, a));
+  const done = await tasks.wait(s.id);
+  return { done, log: tasks.get(s.id).log.join('\n') };
+}
+const argsOf = (recFile) => JSON.parse(fs.readFileSync(recFile, 'utf8'));
+const vals = (args, flag) => args.map((x, i) => (x === flag ? args[i + 1] : null)).filter((x) => x !== null);
+
+test('disk root (default): rootDisk saved before the spawn, the root drive first, 128 MB; a restart keeps the layer bound by digest; fresh drops it; remove deletes it', async () => {
+  const qcow2 = require('../lib/microvm/qcow2');
+  const recFile = path.join(CFG.root, 'disk-args.json');
+  const c = await runC({ env: envOf({ FAKE_EXIT_AFTER_MS: 30, FAKE_RECORD: recFile }) });
+  const r1 = await waitTask(c.task.id);
+  assert.equal(r1.status, 'done', r1.error);
+  await until(() => !containers.isLive(c.id), 5000, 'the end');
+  let rec = store.get(c.id);
+  assert.equal(rec.rootfs, 'disk');
+  assert.deepEqual([rec.rootDisk.configDigest, rec.rootDisk.disk], [FAKE_CD, 'images/disks/aaaaaaaaaaaa-1111111111111111.qcow2']);
+  const ov = path.join(CFG.microvmsDir, c.id, 'root.qcow2');
+  assert.deepEqual(qcow2.readBacking(ov), { name: '../../images/disks/aaaaaaaaaaaa-1111111111111111.qcow2', format: 'qcow2' });
+  const a1 = argsOf(recFile);
+  const drives = vals(a1.args, '-drive');
+  assert.ok(drives[0].startsWith('file=' + ov.replace(/,/g, ',,') + ',if=none,id=root,format=qcow2,cache=writeback'), drives[0]);
+  assert.ok(!/readonly/.test(drives[0]));
+  assert.ok(vals(a1.args, '-device').some((d) => /drive=root,serial=devbox-root$/.test(d)));
+  assert.match(vals(a1.args, '-initrd')[0], /[\\/]images[\\/]initrd[\\/]disk-[a-f0-9]{16}\.initrd$/);
+  assert.equal(vals(a1.args, '-m')[0], '128');
+  assert.match(a1.specText, /^DEVBOX_ROOT=disk$/m);
+  assert.match(a1.specText, /DEVBOX_MODULES='[^']*virtio_blk[^']*ext4/);
+  assert.ok(rec.timings.rootMs >= rec.timings.initMs, 'timings.rootMs from __DEVBOX_ROOT: ' + JSON.stringify(rec.timings));
+  const sum = containers.summaries().find((x) => x.id === c.id);
+  assert.equal(sum.rootfs, 'disk');
+  assert.ok(sum.rootDiskBytes > 0);
+  const pub = containers.publicRecord(rec);
+  assert.ok(pub.rootDisk.overlayBytes > 0);
+  // restart: no new pull, the same layer, bound by config digest
+  const calls = rootCalls.length;
+  const ino = fs.statSync(ov).ino;
+  const s2 = await startC(c.id);
+  assert.equal(s2.done.status, 'done', s2.done.error);
+  assert.match(s2.log, /are kept \(its writable layer\)/);
+  assert.equal(rootCalls.length, calls + 1);
+  assert.equal(rootCalls[calls].cd, FAKE_CD);
+  assert.equal(path.resolve(rootCalls[calls].disk), path.resolve(CFG.imagesDir, 'disks', 'aaaaaaaaaaaa-1111111111111111.qcow2'));
+  await until(() => !containers.isLive(c.id), 5000, 'the end');
+  assert.equal(fs.statSync(ov).ino, ino, 'the same writable layer');
+  // fresh: the layer goes and the image is looked up again
+  const s3 = await startC(c.id, { fresh: true });
+  assert.equal(s3.done.status, 'done', s3.done.error);
+  assert.match(s3.log, /Started fresh/);
+  assert.equal(rootCalls.length, calls + 1, 'resolved by reference, not by digest');
+  await until(() => !containers.isLive(c.id), 5000, 'the end');
+  assert.ok(fs.existsSync(ov) && store.get(c.id).rootDisk);
+  // remove: the run folder with the layer; the unindexed disk nobody uses
+  // any more goes too (the dangling-disk cleanup)
+  await containers.removeRoute({ id: c.id });
+  assert.ok(!fs.existsSync(path.join(CFG.microvmsDir, c.id)));
+  const diskFile = path.join(CFG.imagesDir, 'disks', 'aaaaaaaaaaaa-1111111111111111.qcow2');
+  if (store.list().some((x) => x.rootDisk)) {
+    // other containers of this suite still name the stand-in disk: it stays
+    await new Promise((res) => setTimeout(res, 300));
+    assert.ok(fs.existsSync(diskFile), 'a disk another container uses is kept');
+  } else await until(() => !fs.existsSync(diskFile), 5000, 'the dangling disk to go');
+});
+
+test('disk root: rootfs ram drops the layer at the next start; ram is opt-in per run; memory bounds per rootfs; NEEDS_MEMORY offers 192', async () => {
+  const recFile = path.join(CFG.root, 'ram-args.json');
+  const c = await runC({ env: envOf({ FAKE_EXIT_AFTER_MS: 30, FAKE_RECORD: recFile }) });
+  await waitTask(c.task.id);
+  await until(() => !containers.isLive(c.id), 5000, 'the end');
+  const ov = path.join(CFG.microvmsDir, c.id, 'root.qcow2');
+  assert.ok(fs.existsSync(ov));
+  await assert.rejects(containers.updateSettings({ id: c.id, mem: 90 }), (e) => e.status === 400 && e.code === 'MEMORY_TOO_SMALL');
+  const m = await containers.updateSettings({ id: c.id, mem: 100 });
+  assert.equal(m.container.mem, 100);
+  await assert.rejects(containers.updateSettings({ id: c.id, rootfs: 'ram' }), (e) => e.code === 'MEMORY_TOO_SMALL', '100 MB cannot hold a RAM root');
+  const u = await containers.updateSettings({ id: c.id, rootfs: 'ram', mem: null });
+  assert.match(u.note, /writable layer .* dropped at the next start/);
+  assert.ok(fs.existsSync(ov), 'kept until the start');
+  const s = await startC(c.id);
+  assert.equal(s.done.status, 'done', s.done.error);
+  assert.match(s.log, /writable layer was dropped/);
+  await until(() => !containers.isLive(c.id), 5000, 'the end');
+  assert.ok(!fs.existsSync(ov));
+  assert.equal(store.get(c.id).rootDisk, null);
+  const a = argsOf(recFile);
+  assert.ok(!vals(a.args, '-drive').some((d) => /id=root/.test(d)), 'no root disk');
+  assert.match(a.specText, /^DEVBOX_ROOT=ram$/m);
+  assert.match(vals(a.args, '-initrd')[0], /aaaaaaaaaaaa-0000000000000000\.initrd$/);
+  await containers.removeRoute({ id: c.id });
+  // a run that asks for RAM; validation of the field
+  await assert.rejects(containers.runRoute({ image: 'fake', ports: [], rootfs: 'tmpfs' }), (e) => e.status === 400 && /rootfs must be disk or ram/.test(e.message));
+  await assert.rejects(containers.runRoute({ image: 'fake', ports: [], rootfs: 'ram', mem: 112 }), (e) => e.code === 'MEMORY_TOO_SMALL');
+  const r = await runC({ rootfs: 'ram', env: envOf({ FAKE_EXIT_AFTER_MS: 30 }) });
+  await waitTask(r.task.id);
+  assert.equal(store.get(r.id).rootfs, 'ram');
+  await until(() => !containers.isLive(r.id), 5000, 'the end');
+  assert.ok(!fs.existsSync(path.join(CFG.microvmsDir, r.id, 'root.qcow2')));
+  await containers.removeRoute({ id: r.id });
+  // a disk root that ran out of memory: the offer is 1.5 x 128 = 192 MB
+  const o = await runC({ env: envOf({ FAKE_INIT_ERROR: 'Out of memory: Killed process 42 (python3)' }) });
+  await waitTask(o.task.id);
+  await until(() => !containers.isLive(o.id), 5000, 'the end');
+  const fo = store.get(o.id).fallback;
+  assert.equal(fo && fo.code, 'NEEDS_MEMORY', JSON.stringify(store.get(o.id)));
+  assert.equal(fo.memMB, 192);
+  await containers.removeRoute({ id: o.id });
+  // ... and 1.5 x what it had when that was more than the default: never an
+  // offer below the memory that already ran out (256 -> 384, not 192)
+  const o2 = await runC({ mem: 256, env: envOf({ FAKE_INIT_ERROR: 'Out of memory: Killed process 42 (python3)' }) });
+  await waitTask(o2.task.id);
+  await until(() => !containers.isLive(o2.id), 5000, 'the end');
+  const fo2 = store.get(o2.id).fallback;
+  assert.equal(fo2 && fo2.code, 'NEEDS_MEMORY', JSON.stringify(store.get(o2.id)));
+  assert.equal(fo2.memMB, 384);
+  await containers.removeRoute({ id: o2.id });
+});
+
+test('disk root: the start claims its image disk through onRoot while prepareImage still holds the image lock (cr-1)', async () => {
+  const prev = run.prepareImage;
+  let during = null;
+  run.prepareImage = async (ref, o) => {
+    const p = fakeDiskPrep(K, null);
+    assert.equal(typeof o.onRoot, 'function', 'the engine passes onRoot');
+    o.onRoot({ disk: p.disk });
+    // what a removal or prune reads from now on
+    during = containers._internal.liveDisks().map((d) => path.resolve(d));
+    return p;
+  };
+  try {
+    const c = await runC({ env: envOf({ FAKE_EXIT_AFTER_MS: 30 }) });
+    const done = await waitTask(c.task.id);
+    assert.equal(done.status, 'done', done.error);
+    await until(() => !containers.isLive(c.id), 5000, 'the end');
+    assert.ok(during && during.includes(path.resolve(fakeDisk())), JSON.stringify(during));
+    await containers.removeRoute({ id: c.id });
+  } finally { run.prepareImage = prev; }
+});
+
+test('disk root memory (cr-3): databases and JVMs get more than the default; a v2.0 container keeps its RAM-root memory; an OOM kill at any time earns the offer', async () => {
+  const recFile = path.join(CFG.root, 'mem-args.json');
+  // a JVM image (JAVA_HOME) with automatic memory: 512 MB, said in the log
+  prepHook = async () => {};
+  prepHook.runtime = { env: ['PATH=/bin', 'JAVA_HOME=/opt/java/openjdk'] };
+  try {
+    const j = await runC({ env: envOf({ FAKE_EXIT_AFTER_MS: 30, FAKE_RECORD: recFile }) });
+    const dj = await waitTask(j.task.id);
+    assert.equal(dj.status, 'done', dj.error);
+    assert.equal(vals(argsOf(recFile).args, '-m')[0], '512');
+    assert.match(tasks.get(j.task.id).log.join('\n'), /a Java \(JVM\) app needs more than the 128 MB default: this start gets 512 MB/);
+    await until(() => !containers.isLive(j.id), 5000, 'the end');
+    await containers.removeRoute({ id: j.id });
+    // ... but a memory the user gave wins
+    const j2 = await runC({ mem: 160, env: envOf({ FAKE_EXIT_AFTER_MS: 30, FAKE_RECORD: recFile }) });
+    await waitTask(j2.task.id);
+    assert.equal(vals(argsOf(recFile).args, '-m')[0], '160');
+    await until(() => !containers.isLive(j2.id), 5000, 'the end');
+    await containers.removeRoute({ id: j2.id });
+  } finally { prepHook = null; }
+  // a v2.0 record (no rootfs, automatic memory) of an image whose RAM initrd
+  // was 150 MB: its first disk-root start keeps max(256, recommendedMemMB)
+  const images = require('../lib/oci/images');
+  images.updateIndex(FAKE_CD, { initrd: { file: 'aaaaaaaaaaaa-0000000000000000.initrd', key: '0', bytes: 150 * 1048576 } });
+  const raw = { containers: { abcabcabcabc: { name: 'old-db', image: 'fake', reference: 'docker.io/library/fake:latest', configDigest: FAKE_CD, status: 'exited', ports: [], volumes: [], shares: [], env: envOf({ FAKE_EXIT_AFTER_MS: 30, FAKE_RECORD: recFile }), copyIn: [], mem: null } } };
+  const n = store.normalize(raw).containers.abcabcabcabc;
+  assert.deepEqual([n.rootfs, n.autoMemFromRam], ['disk', true]);
+  store.put(n);
+  const want = require('../lib/microvm/plan').ramAutoMemMB(150 * 1048576);
+  assert.ok(want > 400, String(want));
+  const s = await startC('abcabcabcabc');
+  assert.equal(s.done.status, 'done', s.done.error);
+  assert.match(s.log, new RegExp('keeps ' + want + ' MB now that its image stays on disk'));
+  assert.equal(vals(argsOf(recFile).args, '-m')[0], String(want));
+  await until(() => !containers.isLive('abcabcabcabc'), 5000, 'the end');
+  assert.deepEqual([store.get('abcabcabcabc').mem, store.get('abcabcabcabc').autoMemFromRam], [want, undefined], 'explicit from now on, said once');
+  await containers.removeRoute({ id: 'abcabcabcabc' });
+  // the kernel OOM-killed processes (init's __DEVBOX_OOM): NEEDS_MEMORY with
+  // the offer, and a warning on the record
+  const o = await runC({ env: envOf({ FAKE_EXIT_AFTER_MS: 30, FAKE_EXIT_CODE: 137, FAKE_OOM: 2 }) });
+  await waitTask(o.task.id);
+  await until(() => !containers.isLive(o.id), 5000, 'the end');
+  const ro = store.get(o.id);
+  assert.equal(ro.fallback && ro.fallback.code, 'NEEDS_MEMORY', JSON.stringify(ro));
+  assert.equal(ro.fallback.memMB, 192);
+  assert.match(ro.exitReason, /killed 2 processes/);
+  assert.ok(ro.warnings.some((w) => /^out of memory: the kernel killed 2 processes during the last run \(128 MB\)/.test(w)), JSON.stringify(ro.warnings));
+  await containers.removeRoute({ id: o.id });
+});
+
+test('a guest QEMU paused for a full host disk is shown as paused, resumed once there is room, and quit at once by a stop (cr-6)', async () => {
+  const c = await runC({ env: envOf({ FAKE_PAUSED: 1 }) });
+  const done = await waitTask(c.task.id);
+  assert.equal(done.status, 'done', done.error);
+  const L = containers._internal.lives.get(c.id);
+  const GB = 1073741824, MB = 1048576;
+  // the free space the checks see (the watcher's own 5 s check included)
+  let free = 50 * GB;
+  const origFree = platform.diskFree;
+  platform.diskFree = (d) => Object.assign(origFree(d), { free });
+  try {
+    // plenty of room: the monitor is not even asked
+    await containers._internal.checkPaused(L);
+    assert.equal(store.get(c.id).paused, undefined);
+    // nearly full: QEMU says paused (io-error)
+    free = 100 * MB;
+    await containers._internal.checkPaused(L);
+    assert.match(store.get(c.id).paused.reason, /disk of this PC is full \(100 MB free\).*resumes by itself/);
+    assert.match(containers.summaries().find((x) => x.id === c.id).paused, /paused by QEMU/);
+    // still nearly full: stays paused; room again: resumed (HMP cont)
+    free = 300 * MB;
+    await containers._internal.checkPaused(L);
+    assert.ok(store.get(c.id).paused);
+    free = 5 * GB;
+    await containers._internal.checkPaused(L);
+    assert.equal(store.get(c.id).paused, undefined);
+    assert.equal(containers.summaries().find((x) => x.id === c.id).paused, null);
+    await stopC(c.id);
+    await containers.removeRoute({ id: c.id });
+    // a stop while paused does not wait for a guest that cannot answer
+    free = 50 * GB;
+    const p = await runC({ env: envOf({ FAKE_PAUSED: 1 }) });
+    await waitTask(p.task.id);
+    free = 10 * MB;
+    await containers._internal.checkPaused(containers._internal.lives.get(p.id));
+    assert.ok(store.get(p.id).paused);
+    const t0 = Date.now();
+    const s = await stopC(p.id, { timeoutS: 10 });
+    assert.ok(Date.now() - t0 < 8000, 'quit at once, not after 10 + 5 + 5 s: ' + (Date.now() - t0));
+    assert.equal(s.result.how, 'forced (quit)');
+    assert.match(s.log, /paused because the disk of this PC is full/);
+    const rp = store.get(p.id);
+    assert.deepEqual([rp.exitCode, rp.paused], [137, undefined]);
+    assert.match(rp.exitReason, /paused: the disk of this PC was full/);
+    await containers.removeRoute({ id: p.id });
+  } finally { platform.diskFree = origFree; }
+});
+
+test('disk root: a layer whose image disk is gone is ROOT_DISK_MISSING (start it fresh); a v2.0 record without rootfs becomes disk', async () => {
+  const c = await runC({ env: envOf({ FAKE_EXIT_AFTER_MS: 30 }) });
+  await waitTask(c.task.id);
+  await until(() => !containers.isLive(c.id), 5000, 'the end');
+  // the stand-in prepareRootByDigest returns the disk, but the overlay names
+  // one that no longer exists
+  fs.rmSync(path.join(CFG.imagesDir, 'disks', 'aaaaaaaaaaaa-1111111111111111.qcow2'));
+  const prev = run.prepareRootByDigest;
+  run.prepareRootByDigest = async (cd) => {
+    const p = Object.assign(fakeDiskPrep(K, null), { configDigest: cd, disk: path.join(CFG.imagesDir, 'disks', 'aaaaaaaaaaaa-2222222222222222.qcow2') });
+    fs.rmSync(path.join(CFG.imagesDir, 'disks', 'aaaaaaaaaaaa-1111111111111111.qcow2')); // (fakeDiskPrep made it again)
+    return p;
+  };
+  try {
+    const s = await startC(c.id);
+    assert.equal(s.done.status, 'error');
+    assert.match(s.done.error, /gone - start it fresh/);
+    assert.equal(store.get(c.id).status, 'error');
+  } finally { run.prepareRootByDigest = prev; }
+  const s2 = await startC(c.id, { fresh: true });
+  assert.equal(s2.done.status, 'done', s2.done.error);
+  await until(() => !containers.isLive(c.id), 5000, 'the end');
+  await containers.removeRoute({ id: c.id });
+  const n = store.normalize({ containers: { abcdefabcdef: { name: 'old', status: 'exited' } } });
+  assert.equal(n.containers.abcdefabcdef.rootfs, 'disk');
 });
 });

@@ -59,6 +59,11 @@ test('imageRules / rootfsRules / decide: systemd and s6 need PID 1, large images
   assert.deepEqual(compat.rootfsRules({ runtime: { entrypoint: ['/init'] }, facts: { s6: false }, capMB: 2048 }), []);
   const exact = compat.rootfsRules({ runtime: small, initrdBytes: 1500 * 1048576, capMB: 2048, recommendedMemMB: rmm });
   assert.equal(exact[0].code, 'LARGE_IMAGE');
+  // a disk root keeps the image on disk: its size says nothing about RAM
+  assert.deepEqual(compat.imageRules({ runtime: small, compressedBytes: 900e6, capMB: 2048, recommendedMemMB: rmm, rootfs: 'disk' }), []);
+  assert.deepEqual(compat.rootfsRules({ runtime: small, initrdBytes: 1500 * 1048576, capMB: 2048, recommendedMemMB: rmm, rootfs: 'disk' }), []);
+  assert.equal(compat.rootfsRules({ runtime: { entrypoint: ['/init'] }, facts: { s6: true }, rootfs: 'disk' })[0].code, 'NEEDS_PID1', 'the other rules stay');
+  assert.equal(compat.rootfsRules({ runtime: small, rootfs: 'disk', warnings: ['x: security.capability dropped'] })[0].code, 'FILE_CAPS');
   assert.equal(compat.memCapMB({ maxMem: 3072 }), 1536);
   assert.equal(compat.memCapMB({ maxMem: 65536 }), 2048);
   assert.equal(compat.memCapMB({ maxMem: 65536, microvmMemCapMB: 999 }), 999);
@@ -90,6 +95,22 @@ test('classify: memory, PID 1, nested runtimes, CPU features, user errors, setup
   assert.equal(c({ exitCode: 125, initMessages: ['cannot mount the shared folder at /app: refused'] }).class, 'SETUP_ERROR');
   assert.deepEqual([c({ exitCode: 125, console: 'Kernel panic - not syncing: VFS' }).class, c({ exitCode: 125, console: 'Kernel panic - not syncing: VFS' }).offer], ['ENGINE_ERROR', 'docker-vm']);
   assert.equal(compat.classify({ exitCode: 1, beforeReady: false, sinceReadyMs: 2000, stderrTail: 'can only run as pid 1' }).class, 'NEEDS_PID1');
+});
+
+test('classify: running out of memory earns the offer at ANY time - init\'s OOM count, a JVM, Node, Go, InnoDB (cr-3)', () => {
+  const late = (o) => compat.classify(Object.assign({ beforeReady: false, sinceReadyMs: 3600000, memMB: 128, recommendedMemMB: 128 }, o));
+  const k = late({ exitCode: 137, oomKills: 1 });
+  assert.deepEqual([k.class, k.offer, k.memMB], ['NEEDS_MEMORY', 'memory', 192]);
+  assert.equal(k.reason, 'the VM ran out of memory at 128 MB (the kernel killed 1 process)');
+  assert.match(late({ exitCode: 1, oomKills: 3 }).reason, /killed 3 processes/);
+  for (const line of ['Exception in thread "main" java.lang.OutOfMemoryError: Java heap space', 'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory',
+    'fatal error: runtime: out of memory', '[ERROR] InnoDB: Cannot allocate memory for the buffer pool', 'MemoryError', "terminate called after throwing an instance of 'std::bad_alloc'"]) {
+    assert.equal((late({ exitCode: 1, stderrTail: line }) || {}).class, 'NEEDS_MEMORY', line);
+  }
+  // an exit 0 says nothing; other late failures stay unclassified
+  assert.equal(late({ exitCode: 0, oomKills: 2 }), null);
+  assert.equal(late({ exitCode: 1, stderrTail: 'can only run as pid 1' }), null);
+  assert.equal(late({ exitCode: 1, oomKills: 0 }), null);
 });
 
 test('validate: commands, env, ports (lan/udp/prefix/suffix), names, users, limits', () => {
@@ -221,7 +242,10 @@ test('init.sh: the stop protocol pieces are in place (early reader, ack, NOSTART
   // volumes, shares and copy-in (bug V2)
   const reader = at('done <"$DEVBOX_TTY"');
   assert.ok(at('. "$SPEC"') < reader);
-  for (const later of ['for m in $DEVBOX_MODULES', 'devbox_mounts ||', 'if [ "$DEVBOX_COPYIN" = 1 ]']) assert.ok(reader < at(later), later);
+  // (the disk root's stage 1 loads its modules before the reader on purpose:
+  // nothing may run in the background before switch_root; the host resends)
+  assert.ok(reader < sh.lastIndexOf('for m in $DEVBOX_MODULES'), 'the main module loop');
+  for (const later of ['devbox_mounts ||', 'if [ "$DEVBOX_COPYIN" = 1 ]']) assert.ok(reader < at(later), later);
   // volumes and shared folders in one ordered list, after the share helpers
   // exist (correct-1); the spec comes from fw_cfg before /.devbox/spec.sh (sec-7)
   assert.ok(at('share_mount() {') < at('devbox_mounts ||'));
@@ -245,4 +269,33 @@ test('init.sh: the stop protocol pieces are in place (early reader, ack, NOSTART
   assert.ok(!/^\s*: >"\$R\/(out|err)"/m.test(sh), 'no FIFO opened by PID 1');
   assert.ok(!/^\s*(: )?>"\$R\/stopping"/m.test(sh));
   assert.ok(!/\r/.test(sh));
+});
+
+test('init.sh: the disk root - stage 1 mounts devbox-root and switch_roots before any background job; stage 2 reuses the spec; no fstrim of /', () => {
+  const sh = initramfs.initScript();
+  const at = (needle) => { const i = sh.indexOf(needle); assert.ok(i >= 0, needle); return i; };
+  const stage1 = at('if [ "$DEVBOX_ROOT" = disk ] && [ "$DEVBOX_STAGE" != 2 ]; then');
+  const sw = at('exec $B switch_root /newroot /.devbox/init');
+  assert.ok(at('. "$SPEC"') < stage1, 'the spec decides the root');
+  assert.ok(sw < at('done <"$DEVBOX_TTY"'), 'switch_root before the console reader (nothing may hold the initramfs)');
+  assert.ok(at('disk_by_serial devbox-root') < sw);
+  // a fresh tmpfs (the image cannot plant a spec there), capped at half the
+  // RAM: copy-in extracts its path list there (cr-5 - 16 MB was too small)
+  assert.ok(at('mount -t tmpfs -o mode=0755,size=50% devbox /newroot/.devbox') < sw, 'the engine folder is a fresh tmpfs: the image cannot plant a spec there');
+  // OOM kills of the boot reach the host just before EXIT, on both ends (cr-3)
+  assert.ok(at('oom_marker\nmarker "EXIT=$code"') > 0);
+  assert.ok(sh.indexOf('oom_marker\n  marker "EXIT=$1"') > 0, 'die() too');
+  at('[ "$k" = oom_kill ]');
+  // the RAM root's / is root's too (cr-2: the disk root writes it 0755 root:root)
+  assert.ok(at('$B chown 0:0 /') < at('$B chmod 755 /'));
+  assert.ok(at('$B cp "$R/spec.sh" /newroot/.devbox/run/spec.sh') < sw);
+  assert.ok(at('if [ "$DEVBOX_STAGE" = 2 ] && [ -s "$R/spec.sh" ]; then') < stage1, 'stage 2 does not read fw_cfg again');
+  at('marker "ROOT uptime=');
+  at('[ "$DEVBOX_ROOT" = disk ] || cap_root');
+  // a clean journal at every end: the normal exit and die()
+  const ro = at('$B mount -o remount,ro / 2>/dev/null || $B sync');
+  assert.ok(sh.lastIndexOf('unmount_volumes') < ro && ro < sh.lastIndexOf('marker "EXIT=$code"'), 'after the volumes, before the exit marker');
+  assert.ok(at('$B mount -o remount,ro /newroot 2>/dev/null || $B mount -o remount,ro / 2>/dev/null') < at('marker "EXIT=$1"'));
+  assert.ok(!/fstrim\s+\/(\s|$)/m.test(sh), 'no fstrim of the root (measured: +150-190 ms and +1 MB of overlay per exit)');
+  assert.ok(!/^DEVBOX_ROOT=disk/m.test(sh), 'the default is the RAM root; the spec says disk');
 });

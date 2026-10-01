@@ -11,15 +11,25 @@
 #                         in a per-run archive only when fw_cfg has none
 #   /.devbox/modules/*.ko kernel modules, loaded in DEVBOX_MODULES order
 #   /.devbox/vols/<serial> ext4 volume mounts (their data/ is bind-mounted)
+# Two roots (DEVBOX_ROOT in the spec):
+#   ram   the initramfs holds the image too (rootfs archive + this archive)
+#   disk  the initramfs holds only busybox, init and the modules; the image
+#         is an ext4 disk (serial devbox-root) that stage 1 mounts and
+#         switch_roots to; this script then runs again as stage 2 on it
+#         (see "disk root" below)
 #
 # Console (ttyS0) protocol; kernel messages go there too:
 #   __DEVBOX_INIT uptime=S   init started
+#   __DEVBOX_ROOT uptime=S   disk root: stage 2 started on the root disk
 #   __DEVBOX_STOPPING        a stop request was ACCEPTED (sent for every
 #                            request, so the host can resend until it sees it)
 #   __DEVBOX_SIGNAL=<SIG>    a signal request was passed on
 #   __DEVBOX_READY           setup done, the container process starts now
 #   __DEVBOX_ERROR=<text>    why init gave up (one line, at most 300 chars)
 #   __DEVBOX_NOSTART         a stop came before the app started: it never ran
+#   __DEVBOX_OOM=<n>         the kernel killed n processes for lack of memory
+#                            during this boot (/proc/vmstat oom_kill), sent
+#                            just before EXIT: the host offers more memory
 #   __DEVBOX_EXIT=<code>     the container process exited (always last)
 # Container stdout/stderr go to the virtio-serial ports devbox.stdout /
 # devbox.stderr when the host attached them (the 8250 console manages only
@@ -65,6 +75,9 @@ DEVBOX_COPYIN=0
 DEVBOX_COPYIN_OWNER=user
 # per-boot output cap per stream (bytes); 0 = unlimited
 DEVBOX_LOG_CAP=1073741824
+# root file system: ram (the initramfs holds the image) | disk (the image
+# disk, serial devbox-root, is mounted and switch_root'ed to)
+DEVBOX_ROOT=ram
 devbox_volumes() { :; }
 devbox_shares() { :; }
 devbox_mounts() { devbox_volumes || return 1; devbox_shares; }
@@ -76,6 +89,18 @@ devbox_exec() { exec "$@" /bin/sh; }
 say() { echo "devbox-init: $*" >/dev/console; }
 dbg() { [ "$DEVBOX_DEBUG" = 1 ] && say "$@"; return 0; }
 marker() { echo "__DEVBOX_$*" >/dev/console; }
+# Out-of-memory kills of this boot, as a marker before EXIT: the console only
+# carries emergency messages (printk 1), so the kernel's own "Out of memory:
+# Killed process" never reaches the host - an app OOM-killed long after it
+# started would otherwise look like a plain crash (cr-3)
+oom_marker() {
+  # a failed redirection of a compound command ends a non-interactive shell:
+  # never risk that in PID 1
+  [ -r /proc/vmstat ] || return 0
+  while read -r k v; do
+    [ "$k" = oom_kill ] && { [ "$v" -gt 0 ] 2>/dev/null && marker "OOM=$v"; return 0; }
+  done </proc/vmstat
+}
 
 # Unmount the volumes (bind mounts first, then the ext4 mounts: reverse order
 # of mounting); fstrim hands blocks freed by the container back to the host
@@ -106,18 +131,27 @@ die() {
   marker "ERROR=$(printf '%s' "$2" | $B tr '\n\r' '  ' | $B head -c 300)"
   $B sync
   unmount_volumes
+  # a disk root goes down clean (journal checkpointed) whatever failed:
+  # /newroot while stage 1 still holds it, else / itself
+  if [ "$DEVBOX_ROOT" = disk ]; then
+    $B mount -o remount,ro /newroot 2>/dev/null || $B mount -o remount,ro / 2>/dev/null
+  fi
+  oom_marker
   marker "EXIT=$1"
   $B poweroff -f
   $B reboot -f
 }
 
 # ---------------------------------------------------------------- mounts
-$B mkdir -p /proc /sys /dev /run "$R"
-$B mount -t proc -o nosuid,nodev,noexec proc /proc
-$B mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
-$B mount -t devtmpfs -o nosuid,mode=0755 devtmpfs /dev 2>/dev/null
+if [ "$DEVBOX_STAGE" != 2 ]; then
+  $B mkdir -p /proc /sys /dev /run "$R"
+  $B mount -t proc -o nosuid,nodev,noexec proc /proc
+  $B mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
+  $B mount -t devtmpfs -o nosuid,mode=0755 devtmpfs /dev 2>/dev/null
+fi
+$B mkdir -p "$R"
 exec 0</dev/null 1>/dev/console 2>&1
-marker "INIT uptime=$($B cut -d' ' -f1 /proc/uptime)"
+if [ "$DEVBOX_STAGE" = 2 ]; then marker "ROOT uptime=$($B cut -d' ' -f1 /proc/uptime)"; else marker "INIT uptime=$($B cut -d' ' -f1 /proc/uptime)"; fi
 # The spec comes from the host as a QEMU fw_cfg file, so that one cached
 # initrd serves every run of an image:
 #   -fw_cfg name=opt/devbox/spec,file=<spec.sh>
@@ -127,11 +161,67 @@ marker "INIT uptime=$($B cut -d' ' -f1 /proc/uptime)"
 # drops /.devbox from image layers). qemu_fw_cfg also serves the
 # shared-folder list (opt/devbox/shares).
 SPEC=
-$B insmod /.devbox/modules/qemu_fw_cfg.ko 2>/dev/null
-f=/sys/firmware/qemu_fw_cfg/by_name/opt/devbox/spec/raw
-[ -r "$f" ] && $B cat "$f" >"$R/spec.sh" && [ -s "$R/spec.sh" ] && SPEC=$R/spec.sh
+# stage 2 (disk root): stage 1 already read fw_cfg and left the spec on the
+# engine's fresh tmpfs at /.devbox/run (the image cannot put a file there);
+# a second fw_cfg read would cost the O(size^2) port exits again
+if [ "$DEVBOX_STAGE" = 2 ] && [ -s "$R/spec.sh" ]; then
+  SPEC=$R/spec.sh
+else
+  $B insmod /.devbox/modules/qemu_fw_cfg.ko 2>/dev/null
+  f=/sys/firmware/qemu_fw_cfg/by_name/opt/devbox/spec/raw
+  [ -r "$f" ] && $B cat "$f" >"$R/spec.sh" && [ -s "$R/spec.sh" ] && SPEC=$R/spec.sh
+fi
 [ -n "$SPEC" ] || SPEC=/.devbox/spec.sh
 [ -r "$SPEC" ] && . "$SPEC" || die 125 "no run spec (neither fw_cfg opt/devbox/spec nor /.devbox/spec.sh)"
+
+# --------------------------------------------------------- disk root
+# DEVBOX_ROOT=disk: the image is an ext4 disk (serial devbox-root: a qcow2
+# overlay of the shared, read-only image disk). Stage 1 (this initramfs)
+# loads the modules, mounts the disk, puts busybox + this script + the spec
+# on a small tmpfs at <disk>/.devbox, moves /dev /proc /sys over and
+# switch_roots: the initramfs is emptied (its RAM freed) and the same script
+# runs again as PID 1 on the disk (DEVBOX_STAGE=2) with everything below
+# unchanged. Nothing runs in the background yet, so nothing keeps the
+# initramfs busy.
+disk_by_serial() {
+  local s n=0
+  for s in /sys/block/vd*/serial; do
+    [ -r "$s" ] || continue
+    if [ "$($B cat "$s")" = "$1" ]; then
+      s=${s%/serial}; s=/dev/${s##*/}
+      # devtmpfs makes the node asynchronously after the probe
+      while [ ! -b "$s" ] && [ $n -lt 50 ]; do $B usleep 20000; n=$((n + 1)); done
+      echo "$s"
+      return 0
+    fi
+  done
+  return 1
+}
+if [ "$DEVBOX_ROOT" = disk ] && [ "$DEVBOX_STAGE" != 2 ]; then
+  for m in $DEVBOX_MODULES; do
+    [ -d "/sys/module/$m" ] || $B insmod "/.devbox/modules/$m.ko" || dbg "insmod $m failed"
+  done
+  dev=$(disk_by_serial devbox-root) || die 125 "the root disk (devbox-root) was not found"
+  $B mkdir -p /newroot
+  $B mount -t ext4 -o "${DEVBOX_ROOT_OPTS:-rw,noatime}" "$dev" /newroot || die 125 "cannot mount the root disk $dev"
+  $B mkdir -p /newroot/.devbox 2>/dev/null
+  # size is a cap, not a reservation: busybox and init take ~1 MB, but
+  # copy-in extracts its list of paths here (one line per file, deleted
+  # after the chown) - a tree of many small files needs tens of MB for a
+  # moment, which the RAM root had on its 90% root (cr-5)
+  $B mount -t tmpfs -o mode=0755,size=50% devbox /newroot/.devbox || die 125 "cannot mount /.devbox on the root disk"
+  $B mkdir -p /newroot/.devbox/run
+  $B cp /.devbox/busybox /.devbox/init /newroot/.devbox/ || die 125 "cannot copy init to the root disk"
+  $B cp "$R/spec.sh" /newroot/.devbox/run/spec.sh 2>/dev/null
+  for d in dev proc sys; do
+    [ -d "/newroot/$d" ] || $B mkdir -p "/newroot/$d"
+    $B mount --move "/$d" "/newroot/$d" || die 125 "cannot move /$d to the root disk"
+  done
+  # busybox switch_root refuses to empty a root without a regular /init
+  [ -f /init ] || : >/init
+  export DEVBOX_STAGE=2
+  exec $B switch_root /newroot /.devbox/init
+fi
 
 # ------------------------------------------------------- stop requests
 # console: raw output (a "\n" stays "\n" in the log) and no echo of the
@@ -192,11 +282,18 @@ $B mount -t cgroup2 -o nosuid,nodev,noexec cgroup2 /sys/fs/cgroup 2>/dev/null
 [ -e /dev/stderr ] || $B ln -s /proc/self/fd/2 /dev/stderr
 # the root is the initramfs tmpfs; the real cap is set just before the app
 # starts (cap_root below)
-$B mount -o remount,size=90% / 2>/dev/null || dbg "cannot resize /"
-# /tmp: the root is already RAM, so a plain 1777 directory (as in Docker)
-$B mkdir -p /tmp && $B chmod 1777 /tmp
-# a tmpfs root starts as 1777; an image root is 0755
-$B chmod 755 /
+if [ "$DEVBOX_ROOT" != disk ]; then
+  $B mount -o remount,size=90% / 2>/dev/null || dbg "cannot resize /"
+  # /tmp: the root is already RAM, so a plain 1777 directory (as in Docker)
+  $B mkdir -p /tmp && $B chmod 1777 /tmp
+  # a tmpfs root starts as 1777, and the image's "./" entry may own it: an
+  # image root is 0755 root:root (Docker; the disk root writes it so - cr-2)
+  $B chown 0:0 /
+  $B chmod 755 /
+else
+  # the image's own /tmp (Docker: part of the writable layer)
+  [ -d /tmp ] || { $B mkdir -p /tmp && $B chmod 1777 /tmp; }
+fi
 echo 1 >/proc/sys/kernel/printk
 
 # --------------------------------------------------------------- modules
@@ -204,7 +301,7 @@ for m in $DEVBOX_MODULES; do
   [ -d "/sys/module/$m" ] || $B insmod "/.devbox/modules/$m.ko" || dbg "insmod $m failed"
 done
 # the module files are RAM in the tmpfs root: free them
-$B rm -rf /.devbox/modules
+$B rm -rf /.devbox/modules 2>/dev/null
 # the ACPI power button = a stop request, armed as soon as its driver is in
 for d in /sys/class/input/event*; do
   [ -r "$d/device/name" ] || continue
@@ -255,21 +352,7 @@ ulimit -H -n 524288 2>/dev/null && ulimit -S -n 1024 2>/dev/null
 # that has one). On first use "data" is created and, like a new Docker named
 # volume, gets the image's content, owner and mode at TARGET (copy-up)
 # unless "nocopy".
-# disk_by_serial SERIAL -> /dev/vdX of the virtio-blk disk with that serial
-disk_by_serial() {
-  local s n=0
-  for s in /sys/block/vd*/serial; do
-    [ -r "$s" ] || continue
-    if [ "$($B cat "$s")" = "$1" ]; then
-      s=${s%/serial}; s=/dev/${s##*/}
-      # devtmpfs makes the node asynchronously after the probe
-      while [ ! -b "$s" ] && [ $n -lt 50 ]; do $B usleep 20000; n=$((n + 1)); done
-      echo "$s"
-      return 0
-    fi
-  done
-  return 1
-}
+# disk_by_serial SERIAL -> /dev/vdX (defined above, before the disk root)
 # fail TEXT: report a setup failure; the caller's die() repeats it to the host
 fail() { FAILED=$1; say "$1"; return 1; }
 FAILED=
@@ -519,7 +602,7 @@ cap_root() {
   [ -n "$avail" ] || return 0
   $B mount -o remount,size=$((used + avail / 2))k / 2>/dev/null || dbg "cannot cap /"
 }
-cap_root
+[ "$DEVBOX_ROOT" = disk ] || cap_root
 
 # ----------------------------------------------------------------- run
 [ -d "$DEVBOX_WORKDIR" ] || $B mkdir -p "$DEVBOX_WORKDIR"
@@ -629,7 +712,15 @@ for p in $relays; do wait "$p" 2>/dev/null; done
 dbg "relays done at $($B cut -d' ' -f1 /proc/uptime)"
 $B sync
 unmount_volumes
+if [ "$DEVBOX_ROOT" = disk ]; then
+  # the journal is checkpointed and / marked clean. No fstrim of the root
+  # (measured: +150-190 ms per exit and +1 MB of zero-flag L2 tables in the
+  # overlay for a free 8 GiB file system; ext4 reuses freed blocks anyway,
+  # so the writable layer only grows to its high-water mark, as in Docker)
+  $B mount -o remount,ro / 2>/dev/null || $B sync
+fi
 [ -e "$R/nostart" ] && marker NOSTART
+oom_marker
 marker "EXIT=$code"
 # stty sets attributes with TCSADRAIN: returns once the console is drained
 $B stty -F "$DEVBOX_TTY" -opost 2>/dev/null

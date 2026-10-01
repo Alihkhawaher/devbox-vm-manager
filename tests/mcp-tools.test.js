@@ -134,7 +134,8 @@ test('the 31 tools (spec section 13 + microVM spec 13 + shares spec 7), each wit
   const ro = listed.filter((t) => t.annotations.readOnlyHint).map((t) => t.name).sort();
   assert.deepEqual(ro, ['get_task', 'image_logs', 'list_containers', 'list_images', 'list_shares', 'list_vms', 'read_file', 'serial_log', 'status']);
   const destructive = listed.filter((t) => t.annotations.destructiveHint).map((t) => t.name).sort();
-  // stop_image: a container's root filesystem lives in RAM and is gone after a stop
+  // stop_image: the app is killed after its timeout, and a rootfs="ram"
+  // container's files are gone after a stop
   assert.deepEqual(destructive, ['cleanup', 'delete_vm', 'download', 'exec', 'remove_container', 'remove_image', 'reset_vm', 'snapshot', 'stop_image', 'upload', 'write_file']);
   const get = (n) => listed.find((t) => t.name === n).inputSchema;
   assert.deepEqual(get('exec').required, ['name', 'command']);

@@ -132,6 +132,24 @@ test('microvmStatus: not ready without QEMU or kernel, with the reason', () => {
   } finally { platform.findTool = orig; resetConfig(); rm(root); }
 });
 
+test('run: a bad field is a 400 even before Setup (checked before NO_KERNEL / PREREQ_MISSING)', async () => {
+  const root = useTempRoot('run-order');
+  const orig = platform.findTool;
+  try {
+    store.load();
+    platform.findTool = (n) => (n === 'qemu' ? '/fake/qemu' : null); // no kernel installed
+    await assert.rejects(containers.runRoute({ image: 'nginx:alpine', rootfs: 'tmpfs' }), (e) => e.status === 400 && /rootfs must be disk or ram/.test(e.message));
+    await assert.rejects(containers.runRoute({ image: 'nginx:alpine', mem: 64 }), (e) => e.status === 400 && e.code === 'MEMORY_TOO_SMALL');
+    await assert.rejects(containers.runRoute({ image: 'nginx:alpine', ports: ['notaport'] }), (e) => e.status === 400);
+    // a valid request still says what is missing
+    await assert.rejects(containers.runRoute({ image: 'nginx:alpine' }), (e) => e.status === 409 && e.code === 'NO_KERNEL');
+    platform.findTool = () => null;
+    await assert.rejects(containers.runRoute({ image: 'nginx:alpine', rootfs: 'tmpfs' }), (e) => e.status === 400);
+    await assert.rejects(containers.runRoute({ image: 'nginx:alpine' }), (e) => e.status === 409 && e.code === 'PREREQ_MISSING');
+    assert.deepEqual(store.list(), [], 'no record for a refused run');
+  } finally { platform.findTool = orig; resetConfig(); rm(root); store.load(); }
+});
+
 test('tasks: spec.ctr is in the summary; ctr:<id> and ctr-stop:<id> are separate locks', async () => {
   tasks._reset();
   let release;

@@ -84,6 +84,35 @@ test('qemuArgs: q35 by default (or QEMU\'s default machine), -cpu max for KVM/HV
   assert.deepEqual(x.slice(-2), ['-fw_cfg', 'name=opt/devbox/shares,file=/r/w.shares']);
 });
 
+// The light profile caps the translation cache of a VM that runs under TCG
+// itself (QEMU's 1 GiB default is committed up front on Windows); a VM with
+// a hardware accelerator keeps its 256 MB fallback cache either way.
+test('accelArgs: TCG VMs get config.json vmTcgTbSizeMB (light profile: 256), 0 = QEMU\'s default; new VMs get defaultMem', () => {
+  const root = useTempRoot('vmtcg');
+  try {
+    assert.equal(CFG.vmTcgTbSizeMB, 0);
+    assert.deepEqual(vm.accelArgs('tcg'), ['-accel', 'tcg', '-cpu', 'max']);
+    assert.deepEqual(vm.accelArgs(undefined), ['-accel', 'tcg', '-cpu', 'max']);
+    assert.equal(CFG.defaultMem, 1024);
+    assert.equal(st.newVmRecord({ port: 2223 }).mem, 1024);
+    fs.writeFileSync(CFG.configFile, JSON.stringify({ lightProfile: true }));
+    require('../lib/config').configure({ data: root });
+    assert.deepEqual(vm.accelArgs('tcg'), ['-accel', 'tcg,tb-size=256', '-cpu', 'max']);
+    assert.deepEqual(vm.accelArgs('whpx'), ['-accel', 'whpx,kernel-irqchip=off', '-accel', 'tcg,tb-size=256'], 'the fallback cache is unchanged');
+    assert.deepEqual(vm.accelArgs('kvm'), ['-accel', 'kvm', '-accel', 'tcg,tb-size=256']);
+    assert.equal(CFG.defaultMem, 512);
+    assert.equal(st.newVmRecord({ port: 2223 }).mem, 512, 'a VM created without a memory size');
+    const q = vm.qemuArgs({ name: 'w', disk: '/d/w.qcow2', mem: 512, cpus: 1, accel: 'tcg', netdev: 'user,id=n0', mac: 'm', monitor: { path: '/r/w.mon' }, serial: { path: '/r/w.ser' } });
+    assert.ok(q.join(' ').includes('-accel tcg,tb-size=256 -cpu max'));
+    // an explicit value wins; the setting applies without a restart
+    require('../lib/config').updateEngineSettings({ vmTcgTbSizeMB: 0 });
+    assert.deepEqual(vm.accelArgs('tcg'), ['-accel', 'tcg', '-cpu', 'max']);
+    require('../lib/config').updateEngineSettings({ vmTcgTbSizeMB: 512, vmDefaultMemMB: 768 });
+    assert.deepEqual(vm.accelArgs('tcg'), ['-accel', 'tcg,tb-size=512', '-cpu', 'max']);
+    assert.equal(st.newVmRecord({ port: 2223 }).mem, 768);
+  } finally { resetConfig(); rm(root); }
+});
+
 test('whpxCpuModel: from the host facts file when present (no PowerShell probe)', { skip: process.platform !== 'win32' && 'Windows only' }, async () => {
   // the model is cached per manager process: forget it around this test
   const { useTempRoot, resetConfig, rm } = require('./helpers');

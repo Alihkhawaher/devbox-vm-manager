@@ -3,7 +3,9 @@
  * lib/http.js end to end on an ephemeral port with a temporary data root:
  * token (401), Host allow-list and Origin (403), content type (415), body
  * limits (413/400), security headers, static-file safety, the route table
- * (404/405), validation before tasks, 202 task starts and 409 busy.
+ * (404/405), validation before tasks, 202 task starts and 409 busy, the
+ * merged global settings (vms.json + config.json engine keys), accelHint in
+ * /api/state, and that the GUI only calls served routes and existing ids.
  * Nothing here starts QEMU or ssh.
  */
 const test = require('node:test');
@@ -131,7 +133,9 @@ test('GET /api/state with the token: 200, the documented shape, no-store', () =>
   assert.equal(j.ok, true);
   for (const k of ['version', 'host', 'platform', 'settings', 'prereqs', 'bases', 'vms', 'tasks', 'limits', 'stateWarning', 'dataRoot']) assert.ok(k in j, k);
   assert.deepEqual(j.vms, []);
-  assert.deepEqual(j.settings, { accel: 'auto', defaultExpose: 'local' });
+  assert.equal(j.settings.accel, 'auto');
+  assert.equal(j.settings.defaultExpose, 'local');
+  assert.equal(j.settings.lightProfile, false, 'the engine settings are merged in');
   assert.deepEqual(Object.keys(j.tasks).sort(), ['recent', 'running']);
   assert.equal(j.limits.maxCpus, CFG.maxCpus);
   assert.equal(j.platform.os, process.platform);
@@ -163,7 +167,8 @@ test('403 for a foreign Origin, and for a cross-site POST without Origin', () =>
   assert.equal(site.status, 403);
   const good = await request(s.port, { method: 'POST', path: '/api/settings', headers: Object.assign({ Origin: 'http://127.0.0.1:' + s.port, 'Sec-Fetch-Site': 'same-origin' }, s.json), body: { accel: 'tcg' } });
   assert.equal(good.status, 200);
-  assert.deepEqual(good.json.settings, { accel: 'tcg', defaultExpose: 'local' });
+  assert.equal(good.json.settings.accel, 'tcg');
+  assert.equal(good.json.settings.defaultExpose, 'local');
 }));
 
 test('415 unless POST bodies are application/json (media type, parameters allowed)', () => withServer(async (s) => {
@@ -336,4 +341,119 @@ test('the route table covers the whole spec section 12 API', () => {
     assert.equal(typeof r.validate, 'function', r.path);
     assert.equal(typeof r.run, 'function', r.path);
   }
+});
+
+// ---------------------------------------------------------------------------
+// global settings: the VM registry's + the engine's (SPEC-diskroot 9, 13)
+// ---------------------------------------------------------------------------
+test('POST /api/settings: accel/defaultExpose to vms.json, engine keys to config.json, one merged reply', () => withServer(async (s) => {
+  const r = await request(s.port, { method: 'POST', path: '/api/settings', headers: s.json, body: { accel: 'tcg', lightProfile: true, microvmMemMB: 144, microvmRootfs: 'ram' } });
+  assert.equal(r.status, 200, r.text);
+  const set = r.json.settings;
+  assert.equal(set.accel, 'tcg');
+  assert.equal(set.defaultExpose, 'local');
+  assert.equal(set.lightProfile, true);
+  assert.equal(set.microvmMemMB, 144);
+  assert.equal(set.microvmRootfs, 'ram');
+  assert.equal(set.vmDefaultMemMB, 512, 'the light default of a key not set');
+  assert.equal(set.tcgTbSizeMB, 64);
+  assert.equal(set.keepAlpineDownload, false);
+  assert.deepEqual(set.explicit.sort(), ['lightProfile', 'microvmMemMB', 'microvmRootfs']);
+  assert.equal(st.state.settings.accel, 'tcg');
+  assert.equal('lightProfile' in st.state.settings, false, 'engine keys never go into vms.json');
+  assert.deepEqual(JSON.parse(fs.readFileSync(CFG.configFile, 'utf8')), { lightProfile: true, microvmMemMB: 144, microvmRootfs: 'ram' });
+  assert.equal(CFG.defaultMem, 512, 'CFG follows at once (no restart)');
+  // GET /api/state reports the same, with the limits the create form uses
+  const g = await request(s.port, { path: '/api/state', headers: s.auth });
+  assert.equal(g.json.settings.lightProfile, true);
+  assert.equal(g.json.settings.microvmMemMB, 144);
+  assert.equal(g.json.limits.defaultMem, 512);
+  assert.deepEqual(g.json.settings.profileDefaults.light.microvmMemMB, 112);
+  // null: back to the profile default
+  const n = await request(s.port, { method: 'POST', path: '/api/settings', headers: s.json, body: { microvmMemMB: null, microvmRootfs: null, lightProfile: false } });
+  assert.equal(n.status, 200, n.text);
+  assert.equal(n.json.settings.microvmMemMB, 128);
+  assert.equal(n.json.settings.microvmRootfs, 'disk');
+  assert.equal(n.json.settings.vmDefaultMemMB, 1024);
+  assert.deepEqual(JSON.parse(fs.readFileSync(CFG.configFile, 'utf8')), { lightProfile: false });
+}));
+
+test('POST /api/settings: every field is checked BEFORE anything is saved (a bad one leaves both files alone)', () => withServer(async (s) => {
+  const cases = [
+    [{ accel: 'tcg', microvmMemMB: 50 }, /microvmMemMB/],
+    [{ lightProfile: true, accel: 'warp' }, /accel must be one of/],
+    [{ lightProfile: true, defaultExpose: 'world' }, /defaultExpose/],
+    [{ accel: 'tcg', tcgTbSizeMB: 2 }, /tcgTbSizeMB/],
+    [{ accel: 'tcg', imagePruneDays: 400 }, /imagePruneDays/],
+    [{ accel: 'tcg', microvmRootfs: 'tmpfs' }, /microvmRootfs/],
+  ];
+  for (const [body, re] of cases) {
+    const r = await request(s.port, { method: 'POST', path: '/api/settings', headers: s.json, body: body });
+    assert.equal(r.status, 400, JSON.stringify(body));
+    assert.equal(r.json.code, 'BAD_REQUEST');
+    assert.match(r.json.error, re);
+  }
+  assert.equal(st.state.settings.accel, 'auto', 'vms.json unchanged');
+  assert.equal(fs.existsSync(CFG.configFile), false, 'config.json never written');
+  assert.equal(CFG.lightProfile, false);
+  // a config.json the manager cannot parse: 409, and the VM settings are not half-applied either
+  fs.writeFileSync(CFG.configFile, '{ broken');
+  const r = await request(s.port, { method: 'POST', path: '/api/settings', headers: s.json, body: { accel: 'tcg', lightProfile: true } });
+  assert.equal(r.status, 409);
+  assert.equal(r.json.code, 'CONFIG_UNREADABLE');
+  assert.equal(st.state.settings.accel, 'auto');
+  // only VM keys: config.json is not needed
+  const v = await request(s.port, { method: 'POST', path: '/api/settings', headers: s.json, body: { defaultExpose: 'lan' } });
+  assert.equal(v.status, 200, v.text);
+  assert.equal(st.state.settings.defaultExpose, 'lan');
+}));
+
+test('GET /api/state: the engine settings, accelHint (null unless the accelerator is TCG) and the microVM status', () => withServer(async (s) => {
+  const platform = require('../lib/platform');
+  const saved = platform.accelStatus;
+  try {
+    platform.accelStatus = () => ({ available: ['whpx', 'tcg'], recommended: 'whpx', detecting: false });
+    let j = (await request(s.port, { path: '/api/state', headers: s.auth })).json;
+    assert.equal(j.accelHint, null);
+    for (const k of ['lightProfile', 'microvmRootfs', 'microvmMemMB', 'tcgTbSizeMB', 'vmTcgTbSizeMB', 'vmDefaultMemMB', 'keepAlpineDownload', 'imagePruneDays', 'explicit', 'profileDefaults', 'ranges']) {
+      assert.ok(k in j.settings, k);
+    }
+    assert.ok(j.microvm && typeof j.microvm === 'object');
+    // still detecting: no hint yet
+    platform.accelStatus = () => ({ available: null, recommended: null, detecting: true });
+    assert.equal((await request(s.port, { path: '/api/state', headers: s.auth })).json.accelHint, null);
+    // TCG only: the hint, the same text the prerequisites row shows
+    platform.accelStatus = () => ({ available: ['tcg'], recommended: 'tcg', detecting: false });
+    j = (await request(s.port, { path: '/api/state', headers: s.auth })).json;
+    assert.equal(j.accelHint.accel, 'tcg');
+    assert.match(j.accelHint.summary, /TCG software emulation/);
+    assert.match(j.accelHint.readme, /Running inside another VM/);
+    assert.ok(Object.keys(j.accelHint.steps).length >= 1);
+    assert.equal(j.prereqs.accel.ok, false);
+    assert.equal(j.prereqs.accel.detail, j.accelHint.summary);
+    assert.equal(j.prereqs.accel.fix, j.accelHint.fix);
+  } finally { platform.accelStatus = saved; }
+}));
+
+// The GUI is plain files with no build step: a typo in a route path or an
+// element id would only show in a browser. Both are checked here.
+test('the GUI only calls API paths the manager serves, and only looks up element ids index.html has', () => {
+  const pub = path.join(__dirname, '..', 'public');
+  const js = fs.readFileSync(path.join(pub, 'app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(pub, 'index.html'), 'utf8');
+  const served = new Set(ROUTES.map((r) => r.path));
+  const called = Array.from(new Set(Array.from(js.matchAll(/'(\/api\/[^'?\s]*)/g)).map((m) => m[1])));
+  assert.ok(called.length > 40, 'found the paths');
+  assert.deepEqual(called.filter((p) => !served.has(p)), [], 'called by app.js but not served');
+  for (const p of ['/api/settings', '/api/container/start', '/api/container/settings', '/api/container/run']) assert.ok(called.indexOf(p) !== -1, p);
+  const ids = new Set(Array.from(html.matchAll(/\sid="([^"]+)"/g)).map((m) => m[1]));
+  const looked = Array.from(new Set(Array.from(js.matchAll(/(?:\$|on|onClick)\('#([A-Za-z0-9_-]+)'/g)).map((m) => m[1])))
+    .filter((id) => !/-$/.test(id)); // 'tab-' + name and friends are built at run time
+  assert.deepEqual(looked.filter((id) => !ids.has(id)), [], 'looked up by app.js but missing in index.html');
+  for (const id of ['qRootfs', 'qRootfsHint', 'qMvOpts', 'csRootfs', 'csRootfsHint', 'accelHow']) assert.ok(ids.has(id), id);
+  // the page rules: no inline script/style/handlers (the CSP would block them)
+  assert.doesNotMatch(html, /<script(?![^>]*\ssrc=)[^>]*>|\sstyle=|\son[a-z]+=/i);
+  // and no HTML strings or native dialogs in the code (comments may name them)
+  const code = js.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  assert.doesNotMatch(code, /\.innerHTML\s*=|insertAdjacentHTML|outerHTML\s*=|document\.write|\beval\(|new Function\(|window\.(alert|confirm|prompt)\(|[^.\w](alert|confirm|prompt)\(/);
 });

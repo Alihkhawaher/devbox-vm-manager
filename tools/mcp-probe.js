@@ -3,7 +3,7 @@
  * Prove an MCP server works with a real protocol conversation - not by
  * loading it.
  *
- * usage: node tools/mcp-probe.js <server.js> [tool_name] [json_args] [--timeout <s>] [--call-timeout <s>] [--expect <tool,tool,...>]
+ * usage: node tools/mcp-probe.js <server.js> [tool_name] [json_args] [--timeout <s>] [--call-timeout <s>] [--expect <tool,tool,...>] [--expect-params <tool.param,...>]
  *
  * Spawns `node <server.js>` the way an MCP host does (stdio pipes, the current
  * environment), then:
@@ -18,6 +18,10 @@
  *   --expect a,b,c              every named tool must be listed (a server that
  *                               lost tools - a module that failed to load, an
  *                               old copy still running - fails the probe)
+ *   --expect-params t.p,...     every named tool must have that parameter (an old
+ *                               server without a newer option fails the probe);
+ *                               by default run_image.rootfs and deploy_image.rootfs
+ *                               are checked whenever those tools are listed
  *   an unknown method           must answer -32601
  *   tools/call (optional)       answered, not isError; prints the reply
  *   stdout                      ANY non-JSON line fails (it corrupts the protocol)
@@ -30,6 +34,8 @@
  *   node tools/mcp-probe.js mcp-server.js serial_log "{\"name\": \"web\", \"lines\": 20}"
  *   node tools/mcp-probe.js mcp-server.js --expect run_image,share_folder,list_containers
  *   node tools/mcp-probe.js mcp-server.js run_image "{\"image\": \"hello-world\", \"wait_for\": \"exit\", \"remove_on_exit\": true}"
+ *   node tools/mcp-probe.js mcp-server.js run_image "{\"image\": \"hello-world\", \"wait_for\": \"exit\", \"rootfs\": \"ram\", \"remove_on_exit\": true}"
+ *   node tools/mcp-probe.js mcp-server.js --expect-params run_image.rootfs,deploy_image.rootfs
  *
  * The server sees this process's environment, so VM_MANAGER_ROOT /
  * VM_MANAGER_PORT select the data folder / port of a manager it starts.
@@ -41,6 +47,10 @@ const path = require('path');
 
 const SUPPORTED = ['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25'];
 const TYPES = ['string', 'integer', 'number', 'boolean', 'array', 'object'];
+// Parameters this project's tools must have when the tool is listed: the
+// root filesystem choice (disk by default, ram on request) of the image
+// tools. A server that lists run_image without it is an old copy.
+const DEFAULT_PARAMS = [{ tool: 'run_image', param: 'rootfs', enum: ['disk', 'ram'] }, { tool: 'deploy_image', param: 'rootfs', enum: ['disk', 'ram'] }];
 
 function usage() {
   const doc = require('fs').readFileSync(__filename, 'utf8').split('\n');
@@ -50,12 +60,19 @@ function usage() {
 }
 
 function parseCli(argv) {
-  const o = { server: null, tool: null, args: {}, timeoutS: 60, callTimeoutS: 600, expect: [] };
+  const o = { server: null, tool: null, args: {}, timeoutS: 60, callTimeoutS: 600, expect: [], expectParams: [] };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--timeout') o.timeoutS = Number(argv[++i]);
     else if (argv[i] === '--call-timeout') o.callTimeoutS = Number(argv[++i]);
     else if (argv[i] === '--expect') o.expect = String(argv[++i] || '').split(',').map((s) => s.trim()).filter(Boolean);
+    else if (argv[i] === '--expect-params') {
+      o.expectParams = String(argv[++i] || '').split(',').map((s) => s.trim()).filter(Boolean).map((s) => {
+        const dot = s.indexOf('.');
+        if (dot < 1 || dot === s.length - 1) { console.log('FAIL  --expect-params takes tool.param entries (got "' + s + '")'); process.exit(1); }
+        return { tool: s.slice(0, dot), param: s.slice(dot + 1) };
+      });
+    }
     else if (argv[i] === '--help' || argv[i] === '-h') usage();
     else rest.push(argv[i]);
   }
@@ -99,6 +116,25 @@ function checkTool(t) {
     if (a.readOnlyHint === true && a.destructiveHint === true) hard.push('annotations say read-only AND destructive');
   }
   return { hard, soft };
+}
+
+// Parameters the listed tools lack: `required` entries ({tool, param,
+// enum?}) always count; DEFAULT_PARAMS only for tools that are listed.
+// -> ['tool.param (why)', ...]
+function missingParams(tools, required) {
+  const by = new Map((tools || []).filter((t) => t && t.name).map((t) => [t.name, t]));
+  const out = [];
+  const check = (e, mustExist) => {
+    const t = by.get(e.tool);
+    if (!t) { if (mustExist) out.push(e.tool + '.' + e.param + ' (no tool ' + e.tool + ')'); return; }
+    const props = (t.inputSchema && t.inputSchema.properties) || {};
+    const p = props[e.param];
+    if (!p) { out.push(e.tool + '.' + e.param + ' (not a parameter)'); return; }
+    if (e.enum && !(Array.isArray(p.enum) && e.enum.every((v) => p.enum.indexOf(v) !== -1))) out.push(e.tool + '.' + e.param + ' (enum lacks ' + e.enum.join('/') + ')');
+  };
+  for (const e of required || []) check(e, true);
+  for (const e of DEFAULT_PARAMS) if (!(required || []).some((r) => r.tool === e.tool && r.param === e.param)) check(e, false);
+  return out;
 }
 
 // Names in `expected` that the listed tools lack.
@@ -197,6 +233,11 @@ function main() {
       if (tools.length) {
         note(tools.map((t) => t.name + (t.annotations && t.annotations.readOnlyHint ? '(ro)' : (t.annotations && t.annotations.destructiveHint ? '(destructive)' : ''))).join(' '));
       }
+      if (tools.length) {
+        const lack = missingParams(tools, o.expectParams);
+        if (lack.length) fail('tools/list: missing parameter(s): ' + lack.join(', '));
+        else if (o.expectParams.length || tools.some((t) => DEFAULT_PARAMS.some((e) => e.tool === t.name))) good('tools/list: the expected parameters are there (' + DEFAULT_PARAMS.concat(o.expectParams).filter((e) => tools.some((t) => t.name === e.tool)).map((e) => e.tool + '.' + e.param).filter((x, i, a) => a.indexOf(x) === i).join(', ') + ')');
+      }
       if (o.expect.length) {
         const missing = missingTools(tools, o.expect);
         if (missing.length) fail('tools/list lacks the expected tool(s): ' + missing.join(', '));
@@ -258,4 +299,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { checkTool, missingTools, parseCli };
+module.exports = { checkTool, missingTools, missingParams, parseCli, DEFAULT_PARAMS };

@@ -94,7 +94,9 @@
           <div class="bar" id="diskBar"><i></i></div>
         </div>
       </div>
-      <div class="hint" id="accelTxt"></div>
+      <div class="hint inrow" id="accelRow"><span id="accelTxt"></span>
+        <span class="tag" id="lightTag" hidden title="Settings (gear): the light profile lowers the default memory of VMs and containers, uses a smaller translation cache without hardware acceleration and prunes unused images">Light profile on</span>
+        <button type="button" class="sm" id="accelHow" hidden>How to turn it on</button></div>
       <div class="hint" id="hostCtrTxt" hidden></div>
     </section>
 
@@ -135,9 +137,10 @@
         <summary>Options - the defaults are usually fine</summary>
         <div class="grid g-3 mt">
           <div><label for="qName">Container name</label><input id="qName" placeholder="(from the image)" autocomplete="off" spellcheck="false"></div>
-          <div><label for="qMem">Memory (MB)</label><input id="qMem" type="number" step="64" inputmode="numeric" placeholder="automatic"></div>
+          <div><label for="qMem">Memory (MB)</label><input id="qMem" type="number" step="64" inputmode="numeric" placeholder="automatic" aria-describedby="qMemHint"></div>
           <div><label for="qCpu">vCPUs</label><input id="qCpu" type="number" step="1" inputmode="numeric" placeholder="1"></div>
         </div>
+        <div class="hint" id="qMemHint"></div>
 
         <div class="subsec">
           <h3>Ports</h3>
@@ -174,7 +177,7 @@
         </div>
 
         <details id="qAdv" class="mt">
-          <summary>Advanced: engine</summary>
+          <summary>Advanced: engine and root filesystem</summary>
           <div class="grid g-line mt">
             <div><label for="qEngine">Engine</label>
               <select id="qEngine">
@@ -182,6 +185,16 @@
                 <option value="microvm">microVM only</option>
                 <option value="docker-vm">Docker inside a VM (full Docker; heavier, needs the base image)</option>
               </select></div>
+          </div>
+          <div id="qMvOpts">
+            <div class="grid g-line mt">
+              <div><label for="qRootfs">Root filesystem (microVM)</label>
+                <select id="qRootfs" aria-describedby="qRootfsHint">
+                  <option value="disk">Disk - the image stays on disk, about 128 MB of RAM whatever its size (recommended)</option>
+                  <option value="ram">RAM - the whole image in memory, resets at every start (needs about 2 x the image + 90 MB)</option>
+                </select></div>
+            </div>
+            <div class="hint" id="qRootfsHint"></div>
           </div>
           <div class="checks">
             <label class="chk"><input type="checkbox" id="qPriv"> privileged</label>
@@ -277,10 +290,17 @@
       <div class="panel" role="tabpanel" id="cp-settings" aria-labelledby="ctab-settings" hidden>
         <div class="grid g-set">
           <div><label for="csName">Name</label><input id="csName" autocomplete="off" spellcheck="false"></div>
-          <div><label for="csMem">Memory (MB)</label><input id="csMem" type="number" step="64" inputmode="numeric" placeholder="automatic"></div>
+          <div><label for="csMem">Memory (MB)</label><input id="csMem" type="number" step="64" inputmode="numeric" placeholder="automatic" aria-describedby="csMemHint"></div>
           <div><label for="csCpu">vCPUs</label><input id="csCpu" type="number" step="1" inputmode="numeric" placeholder="1"></div>
           <div><label for="csNote">Note</label><input id="csNote" maxlength="500" placeholder="what is this container for?" autocomplete="off"></div>
+          <div><label for="csRootfs">Root filesystem</label>
+            <select id="csRootfs" aria-describedby="csRootfsHint">
+              <option value="disk">Disk - files kept until removed</option>
+              <option value="ram">RAM - reset at every start</option>
+            </select></div>
         </div>
+        <div class="hint" id="csRootfsHint"></div>
+        <div class="hint" id="csMemHint"></div>
         <div class="checks">
           <label class="chk"><input type="checkbox" id="csAuto"> Start it with the manager</label>
           <label class="chk"><input type="checkbox" id="csRm"> Remove the container when it exits</label>
