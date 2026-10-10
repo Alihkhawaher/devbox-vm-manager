@@ -54,6 +54,13 @@ test('qemuArgs: virtio disk + UEFI + VNC on the private endpoint + tablet + soun
   const d2 = b.drives.join(' '), e2 = b.extra.join(' ');
   assert.match(e2, /-device VGA,vgamem_mb=32/);
   assert.doesNotMatch(e2, /virtio-vga/);
+  // installation media: the image as a second disk that boots first, the VM's own disk second
+  const rec3 = st.newVmRecord({ kind: 'appliance', appliance: { media: 'image', source: 'x.img.gz' } });
+  const c3 = appliance.qemuArgs(rec3, Object.assign({}, o, { mediaDisk: 'D:/d/k-media.qcow2' })).drives.join(' ');
+  assert.match(c3, /file=D:\/d\/k-media\.qcow2,if=none,id=hd1,format=qcow2 -device virtio-blk-pci,drive=hd1,bootindex=0/);
+  assert.match(c3, /virtio-blk-pci,drive=hd0,bootindex=1/);
+  const c4 = appliance.qemuArgs(st.newVmRecord({ kind: 'appliance', appliance: { media: 'image', bus: 'sata' } }), Object.assign({}, o, { mediaDisk: 'D:/d/k-media.qcow2' })).drives.join(' ');
+  assert.match(c4, /ide-hd,drive=hd1,bus=ahci\.2,bootindex=0/);
   assert.match(d2, /ich9-ahci,id=ahci/);
   assert.match(d2, /ide-hd,drive=hd0,bus=ahci\.0,bootindex=1/);
   assert.match(d2, /media=cdrom,format=raw,readonly=on/);
@@ -87,6 +94,7 @@ test('the record: kind, the appliance block with defaults, template "" (standalo
   // a bad appliance block never produces a bad record
   const b = st.newVmRecord({ kind: 'appliance', appliance: { firmware: 'coreboot', bus: 'ide', media: 'floppy' } });
   assert.deepEqual(b.appliance, { firmware: 'uefi', bus: 'virtio', vga: 'virtio', sound: true, source: '', sourceSha256: null, media: 'disk' });
+  assert.equal(st.newVmRecord({ kind: 'appliance', appliance: { media: 'image' } }).appliance.media, 'image');
   // the display endpoint survives the runtime cleaning
   const r = st.newVmRecord({ runtime: { pid: 5, monitor: { host: '127.1.2.3', port: 4 }, serial: { host: '127.1.2.3', port: 5 }, display: { host: '127.1.2.3', port: 5901 } } });
   assert.deepEqual(r.runtime.display, { host: '127.1.2.3', port: 5901 });

@@ -990,7 +990,12 @@ firmware, rescue systems and installers just as well.
   image becomes the VM's qcow2 disk and is grown to **Disk (GB)** (8 by
   default; Linux images expand into the free space at first boot). An ISO
   stays attached as a CD-ROM next to an empty disk; install the OS from it
-  on the screen, then **Remove CD-ROM** on the Overview tab.
+  on the screen, then **Remove CD-ROM** on the Overview tab. A disk image
+  that is itself an installer (LibreELEC's USB image, most "write to a
+  stick" images) gets the same with **Image is installation media**: it
+  becomes a second, bootable disk beside the empty one, its installer puts
+  the OS on the empty disk, and **Remove installation media** detaches it -
+  the same steps as a USB stick and a mini PC.
 - **Firmware**: UEFI (the edk2 firmware inside the QEMU package, a private
   variable store per VM) like a modern PC, or BIOS (SeaBIOS) for old images.
   **Disk bus**: virtio for Linux, SATA for systems without virtio drivers.
@@ -1012,7 +1017,12 @@ firmware, rescue systems and installers just as well.
   `send_keys` (QEMU key names: `up down ret`, `ctrl-alt-delete`...).
 
 Tested with LibreELEC 12.2.1 Generic (`LibreELEC-Generic.x86_64-12.2.1.img.gz`,
-UEFI, virtio): it boots to Kodi in the Screen tab with hardware acceleration.
+UEFI, virtio, installation media onto an 8 GB disk). Two things learned there:
+the boot menu drops keys typed fast (send them with `delayMs` 400-500), and on a
+PC whose WHPX starts but never runs a guest (the microVM setup's calibration boot
+"did not finish under whpx" in `kernel/host.json`) an appliance is run under TCG
+with QEMU's `max` CPU outright - with the WHPX CPU model LibreELEC's kernel
+panics in `fpstate_reset` at 0.3 s. TCG is slow (minutes to Kodi), but honest.
 
 **Settings apply when they can.** Note, autostart and temporary always save at
 once. Memory, vCPUs, acceleration and SSH exposure are saved while the VM runs
@@ -1973,8 +1983,8 @@ once; follow the task with `GET /api/task?id=`.
 | `POST /api/image/pull` | `{image}`: pull (or refresh) an image into the cache |
 | `POST /api/images/prune` | `{}`: remove images no container uses |
 | `POST /api/vm/create` | `{name, template?, mem?, cpus?, accel?, port?, ports?, sshLan?, start?, waitS?, ephemeral?, autostart?, note?, createdBy?}` |
-| `POST /api/vm/create-appliance` | `{name, source (a .img/.img.gz/.qcow2/.iso file on this PC or an https:// URL), sha256?, firmware?: "uefi"\|"bios", bus?: "virtio"\|"sata", vga?: "virtio"\|"std", sound?, diskGB? (8), mem? (1024), cpus? (2), accel?, ports?, start?, waitS?, ephemeral?, autostart?, note?, createdBy?}`: an [appliance VM](#appliance-vms-any-os-with-a-screen) |
-| `POST /api/vm/eject` | `{name}`: remove the installer ISO of a stopped appliance VM (it boots from its disk from then on) |
+| `POST /api/vm/create-appliance` | `{name, source (a .img/.img.gz/.qcow2/.iso file on this PC or an https:// URL), sha256?, firmware?: "uefi"\|"bios", bus?: "virtio"\|"sata", vga?: "virtio"\|"std", sound?, install? (the image is installation media: a second bootable disk beside an empty diskGB disk), diskGB? (8), mem? (1024), cpus? (2), accel?, ports?, start?, waitS?, ephemeral?, autostart?, note?, createdBy?}`: an [appliance VM](#appliance-vms-any-os-with-a-screen) |
+| `POST /api/vm/eject` | `{name}`: remove the installation media (ISO or image) of a stopped appliance VM (it boots from its own disk from then on) |
 | `POST /api/vm/start` | `{name, waitS?}` (default: 240 s, 600 s under TCG) |
 | `POST /api/vm/stop` | `{name, force?, timeoutS?}` (default: 45 s, 90 s under TCG). `force` also cancels a start that still waits for the guest, and cuts short a normal stop that still waits for the power-off |
 | `POST /api/vm/restart` | `{name, force?, timeoutS?, waitS?}` |

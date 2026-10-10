@@ -10,7 +10,9 @@
   into `<data>/appliances/downloads`, checked against a sha256 when given, and
   reused). The image is converted to the VM's qcow2 disk and grown to the
   chosen size; an ISO stays attached as a CD-ROM beside an empty disk until
-  **Remove CD-ROM** (`POST /api/vm/eject`). UEFI by default, with the edk2
+  **Remove CD-ROM** (`POST /api/vm/eject`), and a disk image marked as
+  **installation media** (`install`) stays a second bootable disk beside an
+  empty one in the same way. UEFI by default, with the edk2
   firmware that ships inside the QEMU package (a private variable store per
   VM); BIOS on request. virtio or SATA disk bus, a sound card that plays on
   this PC's speakers, an absolute-position USB tablet for the mouse. The
@@ -34,6 +36,11 @@
   freezing one into a template is refused (templates are Alpine sandboxes).
 - `connect-src` in the CSP names this origin's `ws://` form so the relay is
   allowed; `img-src` allows `blob:` for the saved screenshot.
+- An appliance on a PC whose WHPX starts but never runs a guest (the microVM
+  setup's calibration boot "did not finish under whpx") is run under TCG with
+  QEMU's `max` CPU instead of the silent fallback with the WHPX CPU model,
+  on which LibreELEC 12's kernel panics. `send_keys` / `POST /api/vm/keys`
+  take `delayMs` for prompts that drop fast keys.
 
 ## 2.1.0
 

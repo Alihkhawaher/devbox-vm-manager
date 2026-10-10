@@ -1313,7 +1313,7 @@
     hideErr(err);
     await runTask('/api/vm/create-appliance', {
       name: name, source: source, sha256: sha || undefined, firmware: $('#apFw').value, bus: $('#apBus').value, vga: $('#apVga').value,
-      diskGB: diskGB, mem: mem, cpus: cpus, sound: $('#apSound').checked,
+      diskGB: diskGB, mem: mem, cpus: cpus, sound: $('#apSound').checked, install: $('#apInstall').checked,
       start: $('#apStart').checked, ephemeral: $('#apTemp').checked, createdBy: 'gui',
     }, {
       btn: b,
@@ -1619,7 +1619,8 @@
     $('#ovTerminal').disabled = v.status !== 'running';
     setText($('#ovTerminal'), isAppliance(v) ? 'Open screen' : 'Open terminal');
     $('#ovCopySsh').hidden = isAppliance(v);
-    $('#ovEject').hidden = !(isAppliance(v) && v.appliance && v.appliance.media === 'iso');
+    $('#ovEject').hidden = !(isAppliance(v) && v.appliance && v.appliance.media !== 'disk');
+    setText($('#ovEject'), isAppliance(v) && v.appliance && v.appliance.media === 'iso' ? 'Remove CD-ROM' : 'Remove installation media');
     $('#ovEject').disabled = isUp(v) || !!v.busy;
     $('#ovForget').hidden = v.status !== 'missing';
     const busyTask = v.busy ? TASKS.byId.get(v.busy) : null;
@@ -1638,6 +1639,7 @@
         kv('Firmware / disk / display', (ap.firmware === 'bios' ? 'BIOS (SeaBIOS)' : 'UEFI (edk2)') + ' / ' + (ap.bus === 'sata' ? 'SATA' : 'virtio') + ' / ' + (ap.vga === 'std' ? 'plain VGA' : 'virtio-vga') + (ap.sound ? ', sound on' : ', no sound'));
         kv('Image', h('span', { class: 'mono', title: ap.source || '' }, ap.sourceName || ap.source || ''));
         if (ap.media === 'iso') kv('CD-ROM', h('span', { class: 'badge warn' }, 'the installer ISO is attached - remove it once the OS is installed (button below)'));
+        if (ap.media === 'image') kv('Installation media', h('span', { class: 'badge warn' }, 'the image is attached as a second disk and boots first - install onto the empty disk, then remove it (button below)'));
       } else {
         kv('SSH', [h('span', { class: 'mono' }, v.sshCommand || ''), ' ', exposureTag(v.sshLan)]);
       }
@@ -4880,7 +4882,7 @@
       showTab('terminal'); if (!sshView.live()) sshView.connect(CURRENT);
     });
     onClick('#ovEject', async (b) => {
-      if (!await confirmDialog('Remove the CD-ROM of "' + CURRENT + '"?', 'The installer ISO is detached; the VM boots from its own disk from now on. Do this once the OS is installed.', 'Remove CD-ROM')) return;
+      if (!await confirmDialog('Remove the installation media of "' + CURRENT + '"?', 'The installer (ISO or image) is detached; the VM boots from its own disk from now on. Do this once the OS is installed.', 'Remove media')) return;
       runTask('/api/vm/eject', { name: CURRENT }, { btn: b });
     });
     onClick('#ovCopySsh', () => { const v = VMS.get(CURRENT); if (v && v.sshCommand) copyText(v.sshCommand, 'the SSH command'); });
