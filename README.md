@@ -995,7 +995,10 @@ firmware, rescue systems and installers just as well.
   stick" images) gets the same with **Image is installation media**: it
   becomes a second, bootable disk beside the empty one, its installer puts
   the OS on the empty disk, and **Remove installation media** detaches it -
-  the same steps as a USB stick and a mini PC.
+  the same steps as a USB stick and a mini PC. Pick the **SATA** disk bus for
+  an install: LibreELEC's installer (and others like it) lists `sd*`, `nvme*`
+  and `mmcblk*` targets only, so a virtio disk (`vd*`) shows as "No devices
+  were found".
 - **Firmware**: UEFI (the edk2 firmware inside the QEMU package, a private
   variable store per VM) like a modern PC, or BIOS (SeaBIOS) for old images.
   **Disk bus**: virtio for Linux, SATA for systems without virtio drivers.
