@@ -1295,6 +1295,33 @@
     });
   }
 
+  // the appliance card: any OS image with a screen (lib/appliance.js)
+  async function createAppliance(b) {
+    const err = $('#apErr');
+    const name = $('#apName').value.trim();
+    const source = $('#apSource').value.trim();
+    const mem = toInt($('#apMem').value), cpus = toInt($('#apCpu').value), diskGB = toInt($('#apDisk').value);
+    const sha = $('#apSha').value.trim().toLowerCase();
+    const why = vmNameProblem(name);
+    if (why) return showErr(err, why, $('#apName'));
+    if (!source) return showErr(err, 'Give the image: a file on this PC or an https:// link.', $('#apSource'));
+    if (/^http:\/\//i.test(source)) return showErr(err, 'Only https:// links are downloaded.', $('#apSource'));
+    const bad = checkMemCpu(mem, cpus);
+    if (bad) return showErr(err, bad);
+    if (!(diskGB >= 2)) return showErr(err, 'The disk must be at least 2 GB.', $('#apDisk'));
+    if (sha && !/^[0-9a-f]{64}$/.test(sha)) return showErr(err, 'The sha256 is 64 hex characters.', $('#apSha'));
+    hideErr(err);
+    await runTask('/api/vm/create-appliance', {
+      name: name, source: source, sha256: sha || undefined, firmware: $('#apFw').value, bus: $('#apBus').value, vga: $('#apVga').value,
+      diskGB: diskGB, mem: mem, cpus: cpus, sound: $('#apSound').checked,
+      start: $('#apStart').checked, ephemeral: $('#apTemp').checked, createdBy: 'gui',
+    }, {
+      btn: b,
+      onError: (e) => showErr(err, e.message),
+      onAccepted: () => { $('#apName').value = ''; },
+    });
+  }
+
   // ===========================================================================
   // VM list (rows are kept and updated in place)
   // ===========================================================================
@@ -1348,6 +1375,7 @@
   }
   function vmTags(v) {
     const out = [];
+    if (isAppliance(v)) out.push(h('span', { class: 'tag appl', title: 'An appliance: its own OS image with a screen, no SSH' }, 'appliance'));
     if (v.ephemeral) out.push(h('span', { class: 'tag temp', title: 'Removed by "Delete all temporary VMs"' }, 'temporary'));
     if (/^(mcp|claude)/.test(v.createdBy || '')) out.push(h('span', { class: 'tag claude', title: 'Created by Claude through the MCP server' }, 'Claude'));
     if (v.autostart) out.push(h('span', { class: 'tag', title: 'Starts with the manager' }, 'autostart'));
@@ -1364,7 +1392,7 @@
     const sel = CURRENT === v.name;
     r.tr.classList.toggle('sel', sel);
     if (sel) r.tr.setAttribute('aria-current', 'true'); else r.tr.removeAttribute('aria-current');
-    const tagKey = [v.ephemeral, v.createdBy, v.autostart, v.pendingRestart].join('|');
+    const tagKey = [v.kind, v.ephemeral, v.createdBy, v.autostart, v.pendingRestart].join('|');
     if (r.tagKey !== tagKey) { r.tagKey = tagKey; setChildren(r.tags, vmTags(v)); }
     const pillKey = v.status + '|' + !!v.busy;
     if (r.pillKey !== pillKey) {
@@ -1373,8 +1401,12 @@
       r.pill.replaceWith(pill);
       r.pill = pill;
     }
-    const sshKey = v.port + '|' + v.sshLan;
-    if (r.sshKey !== sshKey) { r.sshKey = sshKey; setChildren(r.ssh, String(v.port), v.sshLan ? exposureTag(true) : null); }
+    const sshKey = v.kind + '|' + v.port + '|' + v.sshLan;
+    if (r.sshKey !== sshKey) {
+      r.sshKey = sshKey;
+      if (isAppliance(v)) setChildren(r.ssh, h('span', { class: 'small', title: 'An appliance has a screen instead of SSH' }, 'screen'));
+      else setChildren(r.ssh, String(v.port), v.sshLan ? exposureTag(true) : null);
+    }
     setText(r.res, v.mem + ' MB · ' + v.cpus + ' vCPU');
     setText(r.disk, fmtBytes(v.diskBytes));
     setText(r.up, isUp(v) && v.startedAt ? fmtDur(secondsSince(v.startedAt)) : '-');
@@ -1433,7 +1465,10 @@
   // ===========================================================================
   let CURRENT = null;
   let TAB = 'overview';
-  const TABS = ['overview', 'settings', 'docker', 'network', 'terminal', 'serial'];
+  const TABS = ['overview', 'settings', 'docker', 'network', 'terminal', 'serial', 'screen'];
+  // tabs an appliance VM (any OS with a screen, no SSH) does not have, and the one only it has
+  const SSH_TABS = ['docker', 'terminal'];
+  const isAppliance = (v) => !!(v && v.kind === 'appliance');
 
   function selectVm(name, tab) {
     if (!VMS.has(name)) { toast('There is no VM called "' + name + '"', 'err'); return; }
@@ -1457,6 +1492,7 @@
   function leaveVm() {
     sshView.disconnect(true);
     serialView.disconnect(true);
+    screenView.disconnect(true);
     stopLogView();
     resetDocker();
     resetSettingsForms();
@@ -1476,17 +1512,24 @@
     for (const r of VMROWS.values()) { r.tr.classList.remove('sel'); r.tr.removeAttribute('aria-current'); }
   }
 
+  function tabsFor(v) {
+    return TABS.filter((t) => (isAppliance(v) ? SSH_TABS.indexOf(t) === -1 : t !== 'screen'));
+  }
   function showTab(which) {
-    if (TABS.indexOf(which) === -1) which = 'overview';
+    const v = CURRENT ? VMS.get(CURRENT) : null;
+    const tabs = tabsFor(v);
+    if (tabs.indexOf(which) === -1) which = 'overview';
     const prev = TAB;
     TAB = which;
     for (const t of TABS) {
       const on = t === which;
       const b = $('#tab-' + t);
+      b.hidden = tabs.indexOf(t) === -1;
       b.setAttribute('aria-selected', String(on));
       b.tabIndex = on ? 0 : -1;
       $('#p-' + t).hidden = !on;
     }
+    if (which === 'screen') screenView.shown();
     if (prev === 'serial' && which !== 'serial') stopLogTimer();
     if (which === 'docker') loadDocker(false);
     if (which === 'network') loadNetwork(true);
@@ -1495,12 +1538,13 @@
     if (which === 'serial') { serialView.shown(); if (LOGVIEW.open) { refreshLog(true); startLogTimer(); } }
   }
   function onTabKey(e) {
-    const i = TABS.indexOf(TAB);
+    const tabs = tabsFor(CURRENT ? VMS.get(CURRENT) : null);
+    const i = tabs.indexOf(TAB);
     let n = null;
-    if (e.key === 'ArrowRight') n = TABS[(i + 1) % TABS.length];
-    else if (e.key === 'ArrowLeft') n = TABS[(i - 1 + TABS.length) % TABS.length];
-    else if (e.key === 'Home') n = TABS[0];
-    else if (e.key === 'End') n = TABS[TABS.length - 1];
+    if (e.key === 'ArrowRight') n = tabs[(i + 1) % tabs.length];
+    else if (e.key === 'ArrowLeft') n = tabs[(i - 1 + tabs.length) % tabs.length];
+    else if (e.key === 'Home') n = tabs[0];
+    else if (e.key === 'End') n = tabs[tabs.length - 1];
     if (!n) return;
     e.preventDefault();
     showTab(n);
@@ -1540,6 +1584,9 @@
     }
     sshView.updateButtons();
     serialView.updateButtons();
+    screenView.updateButtons();
+    // the tab strip follows the kind (an appliance has a screen, no SSH tabs)
+    if ($('#tab-screen').hidden === !isAppliance(v)) showTab(TAB);
     const hasLog = !!v.hasLog;
     $('#scLogToggle').disabled = !hasLog && !LOGVIEW.open;
     $('#scLogDownload').disabled = !hasLog;
@@ -1570,6 +1617,10 @@
     $('#ovRestart').hidden = !up;
     $('#ovForce').hidden = !(up || v.status === 'stopping');
     $('#ovTerminal').disabled = v.status !== 'running';
+    setText($('#ovTerminal'), isAppliance(v) ? 'Open screen' : 'Open terminal');
+    $('#ovCopySsh').hidden = isAppliance(v);
+    $('#ovEject').hidden = !(isAppliance(v) && v.appliance && v.appliance.media === 'iso');
+    $('#ovEject').disabled = isUp(v) || !!v.busy;
     $('#ovForget').hidden = v.status !== 'missing';
     const busyTask = v.busy ? TASKS.byId.get(v.busy) : null;
     const acc = (STATE.platform && STATE.platform.accel) || {};
@@ -1581,11 +1632,19 @@
       const kids = [];
       const kv = (k, val) => kids.push(h('div', { class: 'k' }, k), h('div', { class: 'v' }, val));
       kv('Status', [statusPill(v), busyTask ? h('span', { class: 'small' }, '  ' + (busyTask.title || 'working') + (busyTask.step ? ': ' + busyTask.step : '')) : null]);
-      kv('SSH', [h('span', { class: 'mono' }, v.sshCommand || ''), ' ', exposureTag(v.sshLan)]);
+      if (isAppliance(v)) {
+        const ap = v.appliance || {};
+        kv('Screen', v.screen ? h('a', { href: '#', class: 'lnk' }, 'open the Screen tab') : h('span', { class: 'small' }, 'shown while the VM runs (Screen tab)'));
+        kv('Firmware / disk / display', (ap.firmware === 'bios' ? 'BIOS (SeaBIOS)' : 'UEFI (edk2)') + ' / ' + (ap.bus === 'sata' ? 'SATA' : 'virtio') + ' / ' + (ap.vga === 'std' ? 'plain VGA' : 'virtio-vga') + (ap.sound ? ', sound on' : ', no sound'));
+        kv('Image', h('span', { class: 'mono', title: ap.source || '' }, ap.sourceName || ap.source || ''));
+        if (ap.media === 'iso') kv('CD-ROM', h('span', { class: 'badge warn' }, 'the installer ISO is attached - remove it once the OS is installed (button below)'));
+      } else {
+        kv('SSH', [h('span', { class: 'mono' }, v.sshCommand || ''), ' ', exposureTag(v.sshLan)]);
+      }
       kv('Acceleration', accelLine(v));
       kv('Memory / vCPUs', v.mem + ' MB / ' + v.cpus + ' vCPU');
       kv('Disk on this PC', fmtBytes(v.diskBytes) + (v.virtualSizeBytes ? ' (virtual size ' + fmtBytes(v.virtualSizeBytes) + ')' : ''));
-      kv('Template', v.template === null || v.template === undefined ? 'unknown' : (v.template === '' ? 'none (standalone disk)' : v.template));
+      if (!isAppliance(v)) kv('Template', v.template === null || v.template === undefined ? 'unknown' : (v.template === '' ? 'none (standalone disk)' : v.template));
       kv('Port forwards', portList(v));
       const upEl = h('span', { class: 'mono' });
       kv('Uptime', upEl);
@@ -1596,6 +1655,8 @@
       if (v.pendingRestart) kv('Pending', h('span', { class: 'badge warn' }, 'Changed settings apply the next time the VM starts'));
       if (v.pendingFsResize) kv('Disk', h('span', { class: 'badge warn' }, 'Enlarged - press Grow filesystem (Settings tab) once the VM runs'));
       keepFocusIn($('#ovKv'), () => setChildren($('#ovKv'), kids));
+      const lnk = $('#ovKv').querySelector('a.lnk');
+      if (lnk) lnk.addEventListener('click', (e) => { e.preventDefault(); showTab('screen'); });
       // last error with QEMU's own words and the serial console tail
       const le = v.lastError;
       $('#ovError').hidden = !le;
@@ -2684,7 +2745,95 @@
     }
   }
 
-  let sshView = null, serialView = null;
+  let sshView = null, serialView = null, screenView = null;
+
+  // ===========================================================================
+  // the VM screen (appliance VMs): noVNC through the manager's WebSocket relay
+  // ===========================================================================
+  // window.DevboxScreen comes from screen.js (an ES module loading noVNC);
+  // the connection is closed whenever the VM changes or the page goes away,
+  // like the terminals (UI-4). Keyboard input goes to the VM only while the
+  // screen has focus (click it).
+  class ScreenView {
+    constructor() {
+      this.conn = null;
+      this.name = null;
+      this.lastStatus = '';
+      this.mount = $('#svScreen');
+      $('#svConnect').addEventListener('click', () => { if (CURRENT) this.connect(CURRENT); });
+      $('#svDisconnect').addEventListener('click', () => this.disconnect(false));
+      $('#svScale').addEventListener('change', () => { if (this.conn) this.conn.setScale($('#svScale').checked); });
+      $('#svCad').addEventListener('click', () => { if (this.conn) this.conn.ctrlAltDel(); });
+      $('#svShot').addEventListener('click', () => this.screenshot());
+      $('#svFull').addEventListener('click', () => {
+        const w = $('#svWrap');
+        if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+        else if (w.requestFullscreen) w.requestFullscreen().catch(() => {});
+      });
+    }
+    live() { return !!this.conn; }
+    setStatus(s) {
+      if (s === this.lastStatus) return;
+      this.lastStatus = s;
+      setText($('#svStatus'), s);
+    }
+    connect(name) {
+      if (!window.DevboxScreen) { toast('The screen viewer (noVNC) did not load - reload the page', 'err'); return; }
+      const v = VMS.get(name);
+      if (!v || !v.screen) { this.setStatus('The VM is not running'); return; }
+      this.disconnect(true);
+      this.name = name;
+      this.setStatus('Connecting...');
+      try {
+        this.conn = window.DevboxScreen.open(this.mount, {
+          name: name, token: TOKEN, scale: $('#svScale').checked,
+          onStatus: (s) => { this.setStatus(s === 'connected' ? 'Connected - click the screen to type' : s); this.updateButtons(); },
+          onDisconnect: (clean) => {
+            const was = this.conn;
+            this.conn = null;
+            this.setStatus(clean ? 'Disconnected' : 'Connection lost' + (VMS.get(name) && !VMS.get(name).screen ? ' - the VM stopped' : ''));
+            this.updateButtons();
+            if (was) setChildren(this.mount);
+          },
+        });
+      } catch (e) { this.conn = null; this.setStatus('Could not open the screen: ' + (e && e.message)); }
+      this.updateButtons();
+    }
+    disconnect(quiet) {
+      const c = this.conn;
+      this.conn = null;
+      if (c) { c.close(); setChildren(this.mount); }
+      if (!quiet) this.setStatus('Disconnected');
+      else if (c) this.setStatus('Not connected');
+      this.updateButtons();
+    }
+    shown() {
+      const v = CURRENT ? VMS.get(CURRENT) : null;
+      if (v && v.screen && !this.conn) this.connect(CURRENT);
+      this.updateButtons();
+    }
+    async screenshot() {
+      if (!CURRENT) return;
+      try {
+        const r = await fetch('/api/vm/screenshot?name=' + encodeURIComponent(CURRENT), { headers: { 'X-DevBox-Token': TOKEN || '' } });
+        if (!r.ok) { let j = null; try { j = await r.json(); } catch (e) {} throw new Error((j && j.error) || ('HTTP ' + r.status)); }
+        const blob = await r.blob();
+        const a = h('a', { href: URL.createObjectURL(blob), download: CURRENT + '-' + new Date().toISOString().replace(/[:.]/g, '-') + '.png' });
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      } catch (e) { toast('Screenshot failed: ' + e.message, 'err'); }
+    }
+    updateButtons() {
+      const v = CURRENT ? VMS.get(CURRENT) : null;
+      const can = !!(v && v.screen);
+      $('#svConnect').disabled = !can || !!this.conn;
+      $('#svDisconnect').disabled = !this.conn;
+      $('#svCad').disabled = !this.conn;
+      $('#svFull').disabled = !this.conn;
+      $('#svShot').disabled = !can;
+      if (!can && !this.conn) this.setStatus(v && v.status === 'booting' ? 'Starting...' : 'The VM is not running');
+    }
+  }
 
   // ---- serial log viewer (UI-16) ----
   const LOGVIEW = { open: false, timer: null, busy: false };
@@ -4710,6 +4859,8 @@
     onClick('#btnCleanTemp', deleteTempVms);
     onClick('#nwGo', createVm);
     on('#nwName', 'keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#nwGo').click(); } });
+    onClick('#apGo', createAppliance);
+    on('#apSource', 'keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#apGo').click(); } });
 
     // remember which defaults the user has overridden (never overwrite those)
     const touch = (e) => { if (e.target && e.target.dataset) e.target.dataset.touched = '1'; };
@@ -4724,7 +4875,14 @@
     onClick('#ovStop', (b) => runTask('/api/vm/stop', { name: CURRENT }, { btn: b }));
     onClick('#ovRestart', (b) => runTask('/api/vm/restart', { name: CURRENT }, { btn: b }));
     onClick('#ovForce', forceStop);
-    onClick('#ovTerminal', () => { showTab('terminal'); if (!sshView.live()) sshView.connect(CURRENT); });
+    onClick('#ovTerminal', () => {
+      if (isAppliance(VMS.get(CURRENT))) { showTab('screen'); return; }
+      showTab('terminal'); if (!sshView.live()) sshView.connect(CURRENT);
+    });
+    onClick('#ovEject', async (b) => {
+      if (!await confirmDialog('Remove the CD-ROM of "' + CURRENT + '"?', 'The installer ISO is detached; the VM boots from its own disk from now on. Do this once the OS is installed.', 'Remove CD-ROM')) return;
+      runTask('/api/vm/eject', { name: CURRENT }, { btn: b });
+    });
     onClick('#ovCopySsh', () => { const v = VMS.get(CURRENT); if (v && v.sshCommand) copyText(v.sshCommand, 'the SSH command'); });
     onClick('#ovForget', () => forgetVm(CURRENT));
     onClick('#sSave', saveSettings);
@@ -4760,7 +4918,8 @@
     serialView = new TermView({ kind: 'serial', mount: '#scTerm', status: '#scStatus', connect: '#scConnect', disconnect: '#scDisconnect' });
     onClick('#scLogToggle', toggleLogView);
     onClick('#scLogDownload', downloadLog);
-    window.addEventListener('pagehide', () => { sshView.abandon(); serialView.abandon(); clogStop(); });
+    screenView = new ScreenView();
+    window.addEventListener('pagehide', () => { sshView.abandon(); serialView.abandon(); screenView.disconnect(true); clogStop(); });
 
     // shared folders (VM settings)
     onClick('#shBrowse', () => browseInto($('#shHost')));

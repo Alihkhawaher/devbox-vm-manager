@@ -157,6 +157,8 @@ label.chk{display:inline-flex;align-items:center;gap:7px;margin:0;text-transform
 .checks{display:flex;gap:8px 18px;flex-wrap:wrap;align-items:center;margin-top:10px}
 .grid{display:grid;gap:10px;align-items:end}
 .g-create{grid-template-columns:2fr 1fr 1fr 1.4fr auto}
+.g-appl{grid-template-columns:1.2fr 2fr 1fr 1fr 1fr 0.8fr 1fr 0.8fr 1.6fr auto}
+.g-appl .span2{grid-column:span 2}
 .g-set{grid-template-columns:repeat(4,1fr)}
 .g-run{grid-template-columns:1.6fr 1fr auto}
 .g-quick{grid-template-columns:1fr auto}
@@ -299,6 +301,12 @@ td .urls{display:flex;gap:4px 10px;flex-wrap:wrap;margin-top:3px}
 .tstatus.err{color:#ffb4b4}
 .termwrap{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:8px;height:440px;overflow:hidden}
 .term{height:100%;width:100%}
+/* the VM screen (noVNC draws a canvas inside .screen) */
+.screenwrap{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:4px;height:560px;overflow:hidden;resize:vertical}
+.screen{height:100%;width:100%;outline:none}
+.screen:focus{box-shadow:0 0 0 2px var(--accent, #4f8cff) inset}
+.screenwrap:fullscreen{height:100vh;border:0;border-radius:0;padding:0}
+.tag.appl{color:#9ad8f5;border-color:#1d4a5a}
 /* Baseline for xterm's DOM renderer. xterm injects a style element with its
    theme and cell sizes, which this page's CSP blocks; app.js mirrors that CSS
    through the CSSOM. These rules keep the terminal readable even if the

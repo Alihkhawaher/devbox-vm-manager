@@ -4,7 +4,7 @@
  * pipes) with a temporary data root and a free port:
  *   initialize -> the negotiated version and serverInfo
  *   notifications/initialized -> no reply
- *   tools/list -> the 31 tools (VMs, shared folders, microVM containers)
+ *   tools/list -> the 34 tools (VMs, shared folders, microVM containers)
  *   tools/call status -> starts a REAL headless manager for that data root on
  *                        that port (VM_MANAGER_PORT), and reports on it
  *   stdout carries nothing but JSON-RPC; closing stdin ends the server
@@ -160,7 +160,7 @@ test('mcp-server.js: handshake, tools, and a status call that starts a manager',
     send({ jsonrpc: '2.0', method: 'notifications/initialized' });
     send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     const tl = await reply(2);
-    assert.equal(tl.result.tools.length, 31);
+    assert.equal(tl.result.tools.length, 34);
     for (const n of ['create_vm', 'run_image', 'stop_image', 'image_logs', 'list_containers', 'list_images', 'share_folder', 'unshare_folder', 'list_shares']) {
       assert.ok(tl.result.tools.some((t) => t.name === n), n + ' is listed');
     }

@@ -15,6 +15,8 @@
 <script src="/vendor/xterm.js" defer></script>
 <script src="/vendor/xterm-addon-fit.js" defer></script>
 <script src="/app.js" defer></script>
+<!-- the VM screen (noVNC, an ES module): exposes window.DevboxScreen for app.js -->
+<script type="module" src="/screen.js"></script>
 </head>
 <body>
 <a class="skip" href="#vmCard">Skip to the VM list</a>
@@ -373,6 +375,7 @@
         <button type="button" class="tab" role="tab" id="tab-network" data-tab="network" aria-controls="p-network" aria-selected="false" tabindex="-1">Network</button>
         <button type="button" class="tab" role="tab" id="tab-terminal" data-tab="terminal" aria-controls="p-terminal" aria-selected="false" tabindex="-1">Terminal</button>
         <button type="button" class="tab" role="tab" id="tab-serial" data-tab="serial" aria-controls="p-serial" aria-selected="false" tabindex="-1">Serial console</button>
+        <button type="button" class="tab" role="tab" id="tab-screen" data-tab="screen" aria-controls="p-screen" aria-selected="false" tabindex="-1" hidden>Screen</button>
       </div>
 
       <!-- ---- overview ---- -->
@@ -385,6 +388,7 @@
           <button type="button" class="sm danger-outline" id="ovForce">Force stop</button>
           <button type="button" class="sm" id="ovTerminal">Open terminal</button>
           <button type="button" class="sm" id="ovCopySsh">Copy SSH command</button>
+          <button type="button" class="sm" id="ovEject" hidden>Remove CD-ROM</button>
           <button type="button" class="sm danger" id="ovForget" hidden>Remove record</button>
         </div>
         <div class="errbox" id="ovError" hidden>
@@ -614,6 +618,50 @@
         <div class="hint">The serial console is the VM's own root console: it works while the VM is booting
           and when its network or SSH is broken. Only one serial connection is possible at a time.</div>
       </div>
+
+      <!-- ---- screen (appliance VMs) ---- -->
+      <div class="panel" role="tabpanel" id="p-screen" aria-labelledby="tab-screen" hidden>
+        <div class="termbar">
+          <button type="button" class="sm primary" id="svConnect">Connect to the screen</button>
+          <button type="button" class="sm" id="svDisconnect" disabled>Disconnect</button>
+          <span class="tstatus" id="svStatus" role="status">Not connected</span>
+          <div class="grow"></div>
+          <label class="chk"><input type="checkbox" id="svScale" checked> Fit to window</label>
+          <button type="button" class="sm" id="svCad" disabled title="Send Ctrl+Alt+Delete to the VM">Ctrl+Alt+Del</button>
+          <button type="button" class="sm" id="svShot" disabled>Save screenshot</button>
+          <button type="button" class="sm" id="svFull" disabled>Full screen</button>
+        </div>
+        <div class="screenwrap" id="svWrap"><div class="screen" id="svScreen" tabindex="0" aria-label="VM screen"></div></div>
+        <div class="hint">Click the screen to type into the VM; the mouse works as a tablet (the pointer is where you point).
+          Sound plays on this PC's speakers. The screen is relayed only to this browser through the manager (token checked),
+          never opened on a port.</div>
+      </div>
+    </section>
+
+    <!-- ============ CREATE AN APPLIANCE ============ -->
+    <section class="card" aria-labelledby="apTitle">
+      <h2 id="apTitle">Create an appliance VM</h2>
+      <p class="hint">Boot any operating-system image with a screen instead of SSH: a <span class="mono">.img</span>, <span class="mono">.img.gz</span>,
+        <span class="mono">.qcow2</span> disk image or a <span class="mono">.iso</span> installer, from a file on this PC or an https:// link
+        (downloaded once into the data folder). A media box like LibreELEC, a router firmware, a rescue system...</p>
+      <div class="grid g-appl">
+        <div><label for="apName">Name</label><input id="apName" placeholder="kodi" autocomplete="off" spellcheck="false"></div>
+        <div class="span2"><label for="apSource">Image file or https:// URL</label><input id="apSource" placeholder="D:\Downloads\LibreELEC-Generic.x86_64-12.2.1.img.gz" autocomplete="off" spellcheck="false"></div>
+        <div><label for="apFw">Firmware</label><select id="apFw"><option value="uefi">UEFI (edk2)</option><option value="bios">BIOS (SeaBIOS)</option></select></div>
+        <div><label for="apBus">Disk bus</label><select id="apBus"><option value="virtio">virtio (Linux)</option><option value="sata">SATA (other OS)</option></select></div>
+        <div><label for="apVga">Display</label><select id="apVga"><option value="virtio">virtio-vga (Linux)</option><option value="std">plain VGA</option></select></div>
+        <div><label for="apDisk">Disk (GB)</label><input id="apDisk" type="number" step="1" inputmode="numeric" value="8"></div>
+        <div><label for="apMem">Memory (MB)</label><input id="apMem" type="number" step="128" inputmode="numeric"></div>
+        <div><label for="apCpu">vCPUs</label><input id="apCpu" type="number" step="1" inputmode="numeric"></div>
+        <div><label for="apSha">sha256 (optional)</label><input id="apSha" placeholder="published checksum, checked after download" autocomplete="off" spellcheck="false"></div>
+        <button type="button" class="primary" id="apGo">Create</button>
+      </div>
+      <div class="checks">
+        <label class="chk"><input type="checkbox" id="apStart" checked> Start it right away</label>
+        <label class="chk"><input type="checkbox" id="apSound" checked> Sound on this PC's speakers</label>
+        <label class="chk"><input type="checkbox" id="apTemp"> Temporary VM</label>
+      </div>
+      <div class="field-error" id="apErr" role="alert" hidden></div>
     </section>
 
     <!-- ============ CREATE ============ -->

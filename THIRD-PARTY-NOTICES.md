@@ -3,6 +3,18 @@
 devbox VM Manager itself is MIT-licensed (see [LICENSE](LICENSE)). It ships
 the following third-party material unmodified.
 
+## noVNC
+
+`public/vendor/novnc/core/` and `public/vendor/novnc/vendor/pako/` are the
+`core` library and its vendored pako copy from
+[noVNC](https://github.com/novnc/noVNC) 1.7.0, unmodified, used for the
+Screen tab of appliance VMs (the manager relays QEMU's VNC server to it over
+a WebSocket). The noVNC core library is distributed under the Mozilla Public
+License 2.0; pako under the MIT License. The upstream `LICENSE.txt` and
+`AUTHORS` files are kept next to them in `public/vendor/novnc/`. The MPL 2.0
+requires that the source of these files stays available: it is, unmodified,
+in that folder and upstream.
+
 ## xterm.js and its fit add-on
 
 `public/vendor/xterm.js`, `public/vendor/xterm.css` and

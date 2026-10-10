@@ -1,5 +1,40 @@
 # Changelog
 
+## 2.2.0
+
+**Appliance VMs: boot any operating-system image with a screen.**
+
+- **Create an appliance VM** (a new card in the GUI, `POST /api/vm/create-appliance`,
+  MCP `create_appliance_vm`): a `.img`, `.img.gz`, `.qcow2` disk image or a
+  `.iso` installer, from a file on this PC or an https:// URL (downloaded once
+  into `<data>/appliances/downloads`, checked against a sha256 when given, and
+  reused). The image is converted to the VM's qcow2 disk and grown to the
+  chosen size; an ISO stays attached as a CD-ROM beside an empty disk until
+  **Remove CD-ROM** (`POST /api/vm/eject`). UEFI by default, with the edk2
+  firmware that ships inside the QEMU package (a private variable store per
+  VM); BIOS on request. virtio or SATA disk bus, a sound card that plays on
+  this PC's speakers, an absolute-position USB tablet for the mouse. The
+  first use was LibreELEC (Kodi) tried out before going on a mini PC.
+- **Screen tab**: the VM's display in the browser (noVNC, vendored under
+  `public/vendor/novnc`, MPL 2.0), with keyboard, mouse, fit-to-window,
+  Ctrl+Alt+Del, full screen and **Save screenshot**. QEMU's VNC server binds
+  the VM's private endpoint only (the same unguessable 127.x.y.z as its
+  monitor on Windows); the manager relays it to the browser over its own
+  WebSocket route `GET /api/vm/screen` (token, Host and Origin checked like
+  every request) through `lib/ws.js`, a small RFC 6455 server written on the
+  standard library. Nothing listens for the screen anywhere else.
+- For Claude: `screenshot_vm` (QEMU's `screendump`, turned into a PNG by
+  `lib/png.js`, saved under `<data>/screenshots`) and `send_keys` (QEMU
+  `sendkey` names), so it can look at the screen it is testing and drive it.
+  `GET /api/vm/screenshot?name=` and `POST /api/vm/keys` for everyone else.
+- Appliance VMs have no SSH: the status is "running" as soon as the screen
+  answers, Stop sends an ACPI power-off, the Terminal and Docker tabs are
+  hidden for them, and their SSH port number is never forwarded (it only
+  keeps the MAC unique). Snapshots, resize, compact, delete work as before;
+  freezing one into a template is refused (templates are Alpine sandboxes).
+- `connect-src` in the CSP names this origin's `ws://` form so the relay is
+  allowed; `img-src` allows `blob:` for the saved screenshot.
+
 ## 2.1.0
 
 **Containers run from a disk now, so they need about 128 MB of RAM whatever

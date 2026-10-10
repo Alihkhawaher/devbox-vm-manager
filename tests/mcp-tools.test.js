@@ -118,11 +118,11 @@ function toolsFor(m, extra) {
 // ---------------------------------------------------------------------------
 // the list
 // ---------------------------------------------------------------------------
-test('the 31 tools (spec section 13 + microVM spec 13 + shares spec 7), each with a healthy schema and honest annotations', () => {
+test('the 34 tools (spec section 13 + microVM spec 13 + shares spec 7 + appliance VMs), each with a healthy schema and honest annotations', () => {
   const s = createServer({ name: 'devbox-vms', version: '2.0.0' });
   for (const t of T.createTools({ connect: async () => { throw new Error('unused'); } })) s.addTool(t);
   const listed = s.listTools();
-  assert.equal(listed.length, 31);
+  assert.equal(listed.length, 34);
   assert.deepEqual(listed.map((t) => t.name), T.TOOL_NAMES);
   for (const t of listed) {
     assert.deepEqual(schemaProblems(t), [], t.name);
@@ -132,7 +132,7 @@ test('the 31 tools (spec section 13 + microVM spec 13 + shares spec 7), each wit
     assert.ok(t.title, t.name + ' has a title');
   }
   const ro = listed.filter((t) => t.annotations.readOnlyHint).map((t) => t.name).sort();
-  assert.deepEqual(ro, ['get_task', 'image_logs', 'list_containers', 'list_images', 'list_shares', 'list_vms', 'read_file', 'serial_log', 'status']);
+  assert.deepEqual(ro, ['get_task', 'image_logs', 'list_containers', 'list_images', 'list_shares', 'list_vms', 'read_file', 'screenshot_vm', 'serial_log', 'status']);
   const destructive = listed.filter((t) => t.annotations.destructiveHint).map((t) => t.name).sort();
   // stop_image: the app is killed after its timeout, and a rootfs="ram"
   // container's files are gone after a stop

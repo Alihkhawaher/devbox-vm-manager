@@ -25,7 +25,7 @@ with Docker inside. Folders of this PC can be **shared live** with both. An
 - **Live shared folders**: a folder of this PC appears inside a VM or a
   container, both ways, with nothing to install and no copying
   ([details](#shared-folders-live)).
-- **Claude integration**: 31 MCP tools. Claude can run images, create VMs,
+- **Claude integration**: 34 MCP tools. Claude can run images, create VMs,
   run commands in them, move files, share folders and clean up after itself
   ([details](#claude-integration-mcp)).
 - **Your ports stay on this PC**: every published port listens on 127.0.0.1
@@ -971,9 +971,48 @@ From top to bottom:
 | **Network** | every forward of every VM and container: port on this PC, owner, what it is, port inside, who can reach it (this PC / LAN), listening or not, owning process, conflicts, and "restart to apply" where QEMU still listens the old way |
 | **Terminal** | an interactive root (or `dev`) shell in the browser (xterm.js over `ssh -tt`) that follows the window size. Switching VM, closing the panel or closing the browser tab ends the ssh client; a session nobody watches is closed after 60 s; a brief disconnect reconnects and replays what was missed. The VM itself is never affected. |
 | **Serial console** | the VM's own root console: it works while the VM boots and when SSH or networking is broken. Plus the boot log (view or download). One serial connection at a time. |
+| **Screen** | appliance VMs only (see [Appliance VMs](#appliance-vms-any-os-with-a-screen)): the VM's display in the browser - keyboard, mouse, fit to window, Ctrl+Alt+Del, full screen, Save screenshot. An appliance has no Terminal or Docker tab. |
 
-Deep links: `/?vm=<name>&tab=overview|settings|docker|network|terminal|serial`
+Deep links: `/?vm=<name>&tab=overview|settings|docker|network|terminal|serial|screen`
 (and the v1 form `/?console=<name>`, which opens the terminal).
+
+### Appliance VMs: any OS with a screen
+
+The **Create an appliance VM** card boots any operating-system image with a
+screen instead of SSH: a `.img`, `.img.gz`, `.qcow2` disk image or a `.iso`
+installer, from a file on this PC or an https:// link. It was made to try
+LibreELEC (Kodi) before putting it on a mini PC; it fits router or NAS
+firmware, rescue systems and installers just as well.
+
+- **Image**: a link is downloaded once into `<data>/appliances/downloads/`
+  and reused; give the publisher's **sha256** and the create fails on a
+  mismatch. `.gz` is unpacked; the format is read from the bytes. A disk
+  image becomes the VM's qcow2 disk and is grown to **Disk (GB)** (8 by
+  default; Linux images expand into the free space at first boot). An ISO
+  stays attached as a CD-ROM next to an empty disk; install the OS from it
+  on the screen, then **Remove CD-ROM** on the Overview tab.
+- **Firmware**: UEFI (the edk2 firmware inside the QEMU package, a private
+  variable store per VM) like a modern PC, or BIOS (SeaBIOS) for old images.
+  **Disk bus**: virtio for Linux, SATA for systems without virtio drivers.
+  **Sound** plays on this PC's speakers.
+- **Screen**: QEMU's VNC server listens only on the VM's private endpoint
+  (on Windows the same random 127.x.y.z as its monitor, out of the guests'
+  and everyone else's reach). The Screen tab reaches it through the
+  manager's own WebSocket route (`GET /api/vm/screen`, token, Host and
+  Origin checked), relayed by `lib/ws.js` to noVNC in the browser. Several
+  tabs may watch at once. Nothing is ever opened on a port for the screen.
+- **No SSH**: the VM is "running" once its screen answers; Stop sends an
+  ACPI power-off (a graceful shutdown for every OS that honours the power
+  button; Force stop ends QEMU); port forwards work as for any VM (for
+  example Kodi's web interface on 8080); snapshots, resize and compact too.
+  Freezing an appliance into a template is refused: templates are the
+  Alpine sandboxes.
+- **For Claude**: `create_appliance_vm`, `screenshot_vm` (a PNG under
+  `<data>/screenshots`, so it can look at the screen it is testing) and
+  `send_keys` (QEMU key names: `up down ret`, `ctrl-alt-delete`...).
+
+Tested with LibreELEC 12.2.1 Generic (`LibreELEC-Generic.x86_64-12.2.1.img.gz`,
+UEFI, virtio): it boots to Kodi in the Screen tab with hardware acceleration.
 
 **Settings apply when they can.** Note, autostart and temporary always save at
 once. Memory, vCPUs, acceleration and SSH exposure are saved while the VM runs
@@ -1852,6 +1891,8 @@ JSON, 500 unexpected. Input is checked before anything starts: bad input is a
 | `GET /api/vm/docker/logs?name=&container=&tail=` | `{text, truncated}`; `tail` 250 by default |
 | `GET /api/about` | version, data folder, node path, `mcpServer`, `mcpConfig` (the Connect Claude snippet) |
 | `GET /api/session/stream?id=&token=&since=` | Server-Sent Events: `{t, n}` output chunks (`n` = byte offset; reconnect with `since=n`), `{exit}` at the end |
+| `GET /api/vm/screenshot?name=` | the screen of a running appliance VM as `image/png` (QEMU's `screendump`) |
+| `GET /api/vm/screen?name=&token=` | **WebSocket** (`Upgrade: websocket`): the live screen of a running appliance VM, relayed byte for byte to QEMU's private VNC server for noVNC in the GUI; the token comes in the query string like the streams |
 | `GET /api/containers?all=` | microVM containers (Docker images run without Docker): `{containers}`, env values redacted; `all=0` only the live ones |
 | `GET /api/container?id=&reveal=` | `{container}`: the record (id, name or a unique id prefix of 3+ characters) with `live {phase, ready, stopAcknowledged}`, `timings`, `logSizes`, `initMessages`, `consoleTail`, `warnings`, `fallback`, `rootfs`, `rootDisk {configDigest, disk, createdAt, virtualBytes, overlayBytes}` (null for a RAM root or before the first start), `runtime.rootfs`; `reveal=1` shows env values; share keys never appear |
 | `GET /api/container/logs?id=&stream=stdout\|stderr\|console\|qemu&tail=&prev=` | `{text, size, truncated}` from the last 256 KB (stdout and stderr byte for byte) |
@@ -1903,6 +1944,7 @@ network path (`NETWORK_PATH`).
 | `POST /api/vm/settings` | `{name, mem?, cpus?, accel?, autostart?, note?, ephemeral?, sshLan?}` (note, autostart and ephemeral save even while a task works on the VM; the others wait for it: 409 `BUSY`) | `{vm, pendingRestart}` |
 | `POST /api/vm/ports` | `{name, ports: [{host, guest, lan}] or "8080:80, lan:3000", base?}` (the complete list; `base` = the list you edited: 409 `CHANGED` if the forwards changed meanwhile) **or** `{name, add?: [mapping], remove?: [host]}` (single changes applied to the current list; `add` replaces a forward with the same host and guest port, e.g. to switch `lan`) | `{ports, applied: "live"\|"saved"\|"restart", warnings, pendingRestart}`; 409 `PORT_CONFLICT` naming the holder when a host port is taken (nothing is changed then) |
 | `POST /api/vm/forget` | `{name}` (a record whose disk is missing) | `{forgotten}` |
+| `POST /api/vm/keys` | `{name, keys: ["up", "ret"] or "up up ret", delayMs? (150; 50-2000)}`: QEMU key names (`a`-`z`, `0`-`9`, `ret`, `esc`, `tab`, `spc`, `up`, `down`, `left`, `right`, `backspace`, `f1`-`f12`, `ctrl-alt-delete`, ...) sent to a running appliance VM, at most 64 per call; a firmware or boot-loader prompt under emulation needs a slower `delayMs` (400-500) | `{name, sent, delayMs}` |
 | `POST /api/vm/shares` | `{name, action: "add", hostPath, guestPath, readOnly?}` or `{name, action: "remove", guestPath \| id}` (under the VM's lock: 409 `BUSY` during a start or stop) | `{name, share \| removed, applied: "live"\|"next-start", mounted \| unmounted, pending, warnings, shares, caveat}` |
 | `POST /api/session/open` | `{name, kind: "ssh"\|"serial", user?: "root"\|"dev", cols?, rows?, replace?}` | `{id, kind, command}` |
 | `POST /api/session/input` | `{id, data}` | `{}` |
@@ -1931,6 +1973,8 @@ once; follow the task with `GET /api/task?id=`.
 | `POST /api/image/pull` | `{image}`: pull (or refresh) an image into the cache |
 | `POST /api/images/prune` | `{}`: remove images no container uses |
 | `POST /api/vm/create` | `{name, template?, mem?, cpus?, accel?, port?, ports?, sshLan?, start?, waitS?, ephemeral?, autostart?, note?, createdBy?}` |
+| `POST /api/vm/create-appliance` | `{name, source (a .img/.img.gz/.qcow2/.iso file on this PC or an https:// URL), sha256?, firmware?: "uefi"\|"bios", bus?: "virtio"\|"sata", vga?: "virtio"\|"std", sound?, diskGB? (8), mem? (1024), cpus? (2), accel?, ports?, start?, waitS?, ephemeral?, autostart?, note?, createdBy?}`: an [appliance VM](#appliance-vms-any-os-with-a-screen) |
+| `POST /api/vm/eject` | `{name}`: remove the installer ISO of a stopped appliance VM (it boots from its disk from then on) |
 | `POST /api/vm/start` | `{name, waitS?}` (default: 240 s, 600 s under TCG) |
 | `POST /api/vm/stop` | `{name, force?, timeoutS?}` (default: 45 s, 90 s under TCG). `force` also cancels a start that still waits for the guest, and cuts short a normal stop that still waits for the power-off |
 | `POST /api/vm/restart` | `{name, force?, timeoutS?, waitS?}` |
