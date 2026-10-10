@@ -202,6 +202,28 @@ test('screen: a VM shown in a window refuses the browser relay but still takes k
   await assert.rejects(screen.sendKeys('w', 'nokey!'), (e) => e.status === 400);
 }));
 
+test('textToKeys: a US layout - letters, shifted letters and symbols, Enter and Tab; anything else is a 400', () => {
+  const screen = require('../lib/screen');
+  assert.deepEqual(screen.textToKeys('aZ 9'), ['a', 'shift-z', 'spc', '9']);
+  assert.deepEqual(screen.textToKeys('url=http://10.0.2.2:8123/p.cfg'),
+    ['u', 'r', 'l', 'equal', 'h', 't', 't', 'p', 'shift-semicolon', 'slash', 'slash', '1', '0', 'dot', '0', 'dot', '2', 'dot', '2',
+      'shift-semicolon', '8', '1', '2', '3', 'slash', 'p', 'dot', 'c', 'f', 'g']);
+  assert.deepEqual(screen.textToKeys('a\r\n\tb'), ['a', 'ret', 'tab', 'b']);
+  assert.deepEqual(screen.textToKeys('\\|_~"'),['backslash', 'shift-backslash', 'shift-minus', 'shift-grave_accent', 'shift-apostrophe']);
+  assert.ok(screen.textToKeys('[]{};:\'",<.>/?!@#$%^&*()-=+`').every((k) => screen.validKey(k)));
+  assert.throws(() => screen.textToKeys('caf\u00e9'), (e) => e.status === 400);
+});
+
+test('sendKeys: text is checked before anything is typed (length, type, nothing to send)', () => withRoot('appl-text', async () => {
+  const screen = require('../lib/screen');
+  st.state.vms.w = st.newVmRecord({ kind: 'appliance', appliance: {}, port: 2376, template: '',
+    runtime: { pid: 4243, monitor: { host: '127.0.0.1', port: 1 }, display: { host: '127.0.0.1', port: 5999 } } });
+  await assert.rejects(screen.sendKeys('w', '', 150, 'x'.repeat(257)), (e) => e.status === 400 && /256/.test(e.message));
+  await assert.rejects(screen.sendKeys('w', '', 150, 5), (e) => e.status === 400);
+  await assert.rejects(screen.sendKeys('w', '', 150, ''), (e) => e.status === 400);
+  await assert.rejects(screen.sendKeys('w', 'ret', 150, 'caf\u00e9'), (e) => e.status === 400);
+}));
+
 test('wincap.parseReply: the last JSON line; anything else is a failure', () => {
   assert.deepEqual(wincap.parseReply('noise\r\n{"ok":true,"width":640,"height":480}\r\n'), { ok: true, width: 640, height: 480 });
   assert.equal(wincap.parseReply('').ok, false);

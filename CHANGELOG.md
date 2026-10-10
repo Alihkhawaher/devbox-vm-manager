@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.3.1
+
+- **Type text into a VM**: `POST /api/vm/keys` and the MCP tool `send_keys`
+  take `text` (at most 256 characters, plain ASCII on a US keyboard layout,
+  `\n` = Enter), typed before the `keys`. Made while installing Debian 13
+  unattended: the preseed address was typed into GRUB's boot line
+  (`auto=true priority=critical url=http://10.0.2.2:<port>/preseed.cfg`), and
+  the installer took it from there. A character a US keyboard cannot type is
+  a 400.
+- Learned on Windows (QEMU 11.1, ANGLE): a Linux desktop under Xorg cannot use
+  the 3D window - glamor's first texture upload fails in the host's virgl
+  (`COPY_TRANSFER3D: 22` after GL error 1282), whatever `VIRGL_DEBUG` says, so
+  Xorg's picture is garbage. Kodi (OpenGL ES straight on GBM) works. Desktop
+  guests run in the browser view, where Mesa draws in software (llvmpipe).
+
 ## 2.3.0
 
 **Appliance VMs: a window with 3D graphics at full speed, and SSH to the

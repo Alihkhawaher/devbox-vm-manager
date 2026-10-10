@@ -1,6 +1,6 @@
 {
   "name": "devbox-vm-manager",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "private": true,
   "description": "Local control panel for QEMU sandbox VMs - Node standard library only, no dependencies, no admin rights.",
   "license": "MIT",
