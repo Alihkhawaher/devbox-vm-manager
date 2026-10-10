@@ -1259,7 +1259,9 @@ checks WHPX by starting a paused, diskless QEMU for 2.5 s; on Linux it checks
 that `/dev/kvm` is usable; on an Intel Mac it probes HVF. Apple Silicon Macs
 run the x86 guests with TCG. QEMU is always given TCG as a second choice, so it
 falls back by itself if the first one cannot start, and the manager records and
-shows the accelerator actually in use (Overview, and `accel` in the MCP results).
+shows the accelerator actually in use (Overview, and `accel` in the MCP results)
+- asked from QEMU itself through the monitor (`info accelerators`, QEMU 10+),
+else read from QEMU's output.
 
 ### Probe this PC: the best settings by test boots
 

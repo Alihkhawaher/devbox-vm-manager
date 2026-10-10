@@ -228,3 +228,12 @@ test('parseStatus: running, paused for an I/O error (a full host disk), other st
   assert.equal(monitor.parseStatus(''), null);
   assert.equal(monitor.parseStatus('unknown command'), null);
 });
+
+test('parseAccelerators: the active accelerator is the bracketed one ("info accelerators", QEMU 10+); none without the command', () => {
+  const { parseAccelerators } = require('../lib/monitor');
+  assert.equal(parseAccelerators('qtest tcg [whpx]'), 'whpx');
+  assert.equal(parseAccelerators('qtest [tcg] whpx'), 'tcg');
+  assert.equal(parseAccelerators('[kvm] qtest tcg'), 'kvm');
+  assert.equal(parseAccelerators("unknown command: 'info accelerators'"), null);
+  assert.equal(parseAccelerators(''), null);
+});

@@ -31,6 +31,15 @@ that finds how this PC really runs VMs best.**
 - WHPX accelerator options: with a probe, plain `-accel whpx` (QEMU 11.1
   tunes kernel-irqchip per Windows version itself) unless the probe chose
   otherwise; without one, the old `kernel-irqchip=off`.
+- **The accelerator in use is QEMU's own answer**: QEMU 11.1 no longer prints
+  "Windows Hypervisor Platform accelerator is operational", so every WHPX VM
+  was recorded and shown as TCG ("whpx was not usable"), and every WHPX
+  container got a false "fell back to TCG" warning. VMs and containers now ask
+  the monitor `info accelerators` (the active one is bracketed: `qtest tcg
+  [whpx]`); the log check stays for QEMU builds without that command.
+- Measured after the probe on the same laptop: LibreELEC's splash in ~25 s
+  under WHPX (about 3 min under TCG), a new Alpine VM to SSH in 19 s, an Alpine
+  container in ~4 s end to end.
 
 ### Appliance VMs
 
