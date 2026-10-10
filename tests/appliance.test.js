@@ -117,6 +117,21 @@ test('validateCreate refuses: a bad name, no source, http://, a missing file, a 
   await assert.rejects(appliance.validateCreate({ name: 'k2', source: img }), (e) => e.code === 'PREREQ_MISSING' && /QEMU is not installed/.test(e.message));
 }));
 
+test('installation media live in sandboxes/install-media/, so the disk scan never adopts them as a VM (the phantom "<vm>-media" of 2026-10-10)', () => withRoot(async () => {
+  const path_ = require('path');
+  const { CFG } = require('../lib/config');
+  for (const p of [st.mediaPath('k'), st.mediaDiskPath('k')]) {
+    assert.equal(path_.posix.dirname(p), st.mediaDir());
+    assert.notEqual(path_.posix.dirname(p), CFG.sandboxDir);
+  }
+  fs.mkdirSync(st.mediaDir(), { recursive: true });
+  fs.writeFileSync(st.mediaDiskPath('k'), 'not a real disk');
+  fs.writeFileSync(st.diskPath('k'), 'not a real disk');
+  st.state.vms.k = st.newVmRecord({ kind: 'appliance', appliance: { media: 'image' }, port: 2250 });
+  assert.deepEqual(st.listDisks(), ['k'], 'only the VM\'s own disk counts');
+  assert.deepEqual(st.syncDisks(), [], 'no record is made up for the media');
+}));
+
 test('SOURCE_RE and baseName: Windows paths, POSIX paths, UNC, https; never http', () => {
   for (const s of ['C:\\x\\a.img', 'D:/x/a.img.gz', '/srv/a.iso', '\\\\nas\\share\\a.qcow2', 'https://h/p/a.img.gz?x=1']) assert.ok(appliance.SOURCE_RE.test(s), s);
   for (const s of ['http://h/a.img', 'a.img', 'ftp://h/a.img', '']) assert.ok(!appliance.SOURCE_RE.test(s), s);

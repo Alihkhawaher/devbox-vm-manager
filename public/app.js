@@ -2831,18 +2831,18 @@
       if (!CURRENT) return;
       const name = CURRENT;
       const undo = busyButton(b);
-      try {
-        const r = await api('/api/vm/screen-text?name=' + encodeURIComponent(name));
-        const text = r.text || '(no text recognised on the screen)';
-        await openModal({
-          title: 'Screen of "' + name + '" as text',
-          hint: 'Read by the OCR built into Windows in ' + r.ms + ' ms - expect small slips (u for v, @ for 0).',
-          content: h('pre', { tabindex: '0' }, text),
-          submitLabel: 'Copy', cancelLabel: 'Close', wide: true,
-          onSubmit: () => { copyText(text, 'the screen text'); return true; },
-        });
-      } catch (e) { toast('Screen as text failed: ' + e.message, 'err'); }
-      finally { undo(); }
+      let r;
+      try { r = await api('/api/vm/screen-text?name=' + encodeURIComponent(name)); }
+      catch (e) { toast('Screen as text failed: ' + e.message, 'err'); return; }
+      finally { undo(); }   // the spinner stops when the text is there, not when the dialog closes
+      const text = r.text || '(no text recognised on the screen)';
+      openModal({
+        title: 'Screen of "' + name + '" as text',
+        hint: 'Read by the OCR built into Windows in ' + r.ms + ' ms - expect small slips (u for v, @ for 0).',
+        content: h('pre', { tabindex: '0' }, text),
+        submitLabel: 'Copy', cancelLabel: 'Close', wide: true,
+        onSubmit: () => { copyText(text, 'the screen text'); return true; },
+      });
     }
     updateButtons() {
       const v = CURRENT ? VMS.get(CURRENT) : null;

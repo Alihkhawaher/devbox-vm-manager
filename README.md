@@ -1852,7 +1852,11 @@ The data folder (default `data/` next to `server.js`):
   vm-alpine.qcow2(.json)   the pristine Alpine download and where it came from (url, sha512);
                            with keepAlpineDownload off only the .json stays after the build
   vm-bases/                more templates (e.g. docker-ready.qcow2)
-  sandboxes/               VM disks and consoles: <vm>.qcow2, <vm>-serial.log, base-bake.log
+  sandboxes/               VM disks and consoles: <vm>.qcow2, <vm>-serial.log, base-bake.log;
+                           appliance VMs also <vm>-vars.fd (UEFI variables) and
+                           install-media/<vm>.iso|.qcow2 (until "Remove installation media")
+  appliances/downloads/    OS images an appliance VM was created from by URL (reused)
+  screenshots/             screenshot_vm's PNGs
   seed/id_dev(.pub)        the SSH key for all guests
   qemu/                    managed QEMU install (Windows)
   downloads/               downloads in progress (*.part) and the bake's work disk
