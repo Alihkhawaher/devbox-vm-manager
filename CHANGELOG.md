@@ -2,7 +2,37 @@
 
 ## 2.2.0
 
-**Appliance VMs: boot any operating-system image with a screen.**
+**Appliance VMs: boot any operating-system image with a screen - and a probe
+that finds how this PC really runs VMs best.**
+
+### Probe this PC (hardware acceleration helps, it is never required)
+
+- **The host probe** (`lib/hostprobe.js`; Setup card **Probe this PC**,
+  `POST /api/host/probe`, MCP `probe_host`; setup runs it once) boots the
+  microVM kernel on q35 with 2 vCPUs under each candidate setting and runs a
+  self-check inside (CPU flags, two parallel floating-point jobs, a checksum).
+  The first candidate that passes - the host CPU, the host CPU without
+  XSAVE/AVX, the old flag model, x86-64-v2, then the Hyper-V LAPIC and
+  irqchip variants, QEMU's default model, and TCG as the reference - is used
+  by every VM, appliance and container whose accelerator is automatic. The
+  result is keyed to the QEMU version, CPU and OS build.
+- Found with it on a Windows 10 laptop with QEMU 11.1: the WHPX CPU model this
+  manager used (qemu64 + the AVX/XSAVE family) made every Linux guest panic in
+  `fpstate_reset` 0.3 s into its boot, so VMs froze and the microVM
+  calibration never finished; with XSAVE hidden, WHPX boots the same test
+  guest about 13x faster than TCG.
+- **Hypervisor faults**: QEMU 11.1 pauses a VM whose guest hit a fatal WHPX
+  fault (QEMU stays alive - nothing looked wrong but a frozen screen); older
+  QEMU exits. The status poll now checks `info status` for WHPX VMs (at most
+  every 10 s) and the exit log; an automatic VM is restarted under TCG at once
+  and keeps `accelFallback` (shown on its Overview) until an accelerator is
+  chosen in its Settings. The appliance-only "force TCG" rule of 2.2's first
+  draft is gone: the probe replaces it.
+- WHPX accelerator options: with a probe, plain `-accel whpx` (QEMU 11.1
+  tunes kernel-irqchip per Windows version itself) unless the probe chose
+  otherwise; without one, the old `kernel-irqchip=off`.
+
+### Appliance VMs
 
 - **Create an appliance VM** (a new card in the GUI, `POST /api/vm/create-appliance`,
   MCP `create_appliance_vm`): a `.img`, `.img.gz`, `.qcow2` disk image or a

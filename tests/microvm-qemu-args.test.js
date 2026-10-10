@@ -102,3 +102,13 @@ test('hostcpu: whpxCpuModel and parseTscKhz', () => {
   assert.strictEqual(hostcpu.parseTscKhz('tsc: Detected 2298.7 MHz processor'), 2298700);
   assert.strictEqual(hostcpu.parseTscKhz('nothing'), null);
 });
+
+test('whpxOpts (the host probe\'s): "" is QEMU\'s own defaults, a value is passed as is; absent keeps the old kernel-irqchip', () => {
+  const base = { machine: 'q35', accel: 'whpx', kernel: 'k', accelFallback: false };
+  assert.deepStrictEqual(valuesOf(buildQemuArgs(Object.assign({ whpxOpts: '' }, base)), '-accel'), ['whpx']);
+  assert.deepStrictEqual(valuesOf(buildQemuArgs(Object.assign({ whpxOpts: 'kernel-irqchip=off' }, base)), '-accel'), ['whpx,kernel-irqchip=off']);
+  assert.deepStrictEqual(valuesOf(buildQemuArgs(base), '-accel'), ['whpx,kernel-irqchip=off']);
+  // the probe's CPU model goes through untouched; no CPU model = QEMU's default
+  assert.deepStrictEqual(valuesOf(buildQemuArgs(Object.assign({ whpxOpts: '', cpu: 'host,-xsave,-avx' }, base)), '-cpu'), ['host,-xsave,-avx']);
+  assert.deepStrictEqual(valuesOf(buildQemuArgs(Object.assign({ whpxOpts: '' }, base)), '-cpu'), []);
+});

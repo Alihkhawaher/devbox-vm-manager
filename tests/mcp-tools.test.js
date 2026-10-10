@@ -120,11 +120,11 @@ function toolsFor(m, extra) {
 // ---------------------------------------------------------------------------
 // the list
 // ---------------------------------------------------------------------------
-test('the 36 tools (spec section 13 + microVM spec 13 + shares spec 7 + appliance VMs and their screen), each with a healthy schema and honest annotations', () => {
+test('the 37 tools (spec section 13 + microVM spec 13 + shares spec 7 + appliance VMs and their screen + the host probe), each with a healthy schema and honest annotations', () => {
   const s = createServer({ name: 'devbox-vms', version: '2.0.0' });
   for (const t of T.createTools({ connect: async () => { throw new Error('unused'); } })) s.addTool(t);
   const listed = s.listTools();
-  assert.equal(listed.length, 36);
+  assert.equal(listed.length, 37);
   assert.deepEqual(listed.map((t) => t.name), T.TOOL_NAMES);
   for (const t of listed) {
     assert.deepEqual(schemaProblems(t), [], t.name);

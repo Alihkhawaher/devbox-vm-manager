@@ -976,6 +976,7 @@
     'install-qemu': { path: '/api/install/qemu', label: 'Install QEMU' },
     'build-base': { path: '/api/install/base', label: 'Download & build' },
     'install-kernel': { path: '/api/install/kernel', label: 'Install (about 43 MB)' },
+    'probe-host': { path: '/api/host/probe', label: 'Probe this PC (1-3 min)', body: {} },
   };
   let prereqKey = '', prereqOpened = false;
   // what the two CTA buttons do right now: {path, body}
@@ -1042,6 +1043,8 @@
     // an installed kernel that lacks a feature (e.g. shared folders) is
     // re-prepared from the verified packages already on disk - no download
     if (ok && it.action === 'install-kernel' && it.needsUpdate) act = { path: '/api/install/kernel', label: 'Update (no download)', secondary: true, body: {} };
+    // the host probe can always be run again (a BIOS or driver change, a new Windows build)
+    if (ok && it.action === 'probe-host') act = { path: '/api/host/probe', label: 'Probe again', secondary: true, body: {} };
     return h('div', { class: 'prereq' },
       h('div', { class: 'tick ' + cls, 'aria-hidden': 'true' }, ok ? '✓' : (it.required ? '✗' : '•')),
       h('div', { class: 'txt' },
@@ -1674,13 +1677,18 @@
   function accelLine(v) {
     const acc = (STATE.platform && STATE.platform.accel) || {};
     const global = (STATE.settings && STATE.settings.accel) || 'auto';
+    // the host probe's choice (test boots) beats what merely starts
+    const hp = STATE.hostProbe || {};
+    const auto = hp.current && hp.best ? accelName(hp.best.accel) + ' (' + hp.best.label + ', probed)' : (acc.recommended ? accelName(acc.recommended) + ' on this PC' : '');
     const cfg = v.accel && v.accel !== 'auto' ? accelName(v.accel) + ' (set for this VM)'
-      : (global !== 'auto' ? accelName(global) + ' (global setting)' : 'Automatic' + (acc.recommended ? ' - ' + accelName(acc.recommended) + ' on this PC' : ''));
+      : (global !== 'auto' ? accelName(global) + ' (global setting)' : 'Automatic' + (auto ? ' - ' + auto : ''));
+    const fb = v.accelFallback ? h('div', { class: 'badge warn' },
+      'Runs under TCG since ' + fmtDate(v.accelFallback.at) + ': ' + v.accelFallback.reason + '. Choose an accelerator in Settings to try hardware acceleration again.') : null;
     if (isUp(v) && v.effectiveAccel) {
       return [h('b', null, accelName(v.effectiveAccel)), v.effectiveAccel === 'tcg' ? ' - software emulation, slower' : ' - hardware accelerated',
-        h('span', { class: 'small' }, '   configured: ' + cfg)];
+        h('span', { class: 'small' }, '   configured: ' + cfg), fb];
     }
-    return cfg;
+    return fb ? [cfg, fb] : cfg;
   }
   function portList(v) {
     const ports = v.ports || [];

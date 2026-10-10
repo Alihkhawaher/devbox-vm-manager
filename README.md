@@ -25,7 +25,7 @@ with Docker inside. Folders of this PC can be **shared live** with both. An
 - **Live shared folders**: a folder of this PC appears inside a VM or a
   container, both ways, with nothing to install and no copying
   ([details](#shared-folders-live)).
-- **Claude integration**: 36 MCP tools. Claude can run images, create VMs,
+- **Claude integration**: 37 MCP tools. Claude can run images, create VMs,
   run commands in them, move files, share folders and clean up after itself
   ([details](#claude-integration-mcp)).
 - **Your ports stay on this PC**: every published port listens on 127.0.0.1
@@ -1251,14 +1251,55 @@ in the outer hypervisor; see
 [Running inside another VM](#running-inside-another-vm).
 
 **What "automatic" picks.** A VM or container set to **auto** uses the global
-setting (gear dialog); when that is also **auto**, it uses what the manager
-detected at start-up: the hardware accelerator if there is one, else TCG. On
-Windows the manager checks WHPX by starting a paused, diskless QEMU for 2.5 s;
-on Linux it checks that `/dev/kvm` is usable; on an Intel Mac it probes HVF.
-Apple Silicon Macs run the x86 guests with TCG. QEMU is always given TCG as a
-second choice, so it falls back by itself if the first one cannot start, and
-the manager records and shows the accelerator actually in use (Overview, and
-`accel` in the MCP results).
+setting (gear dialog); when that is also **auto**, it uses what the
+[host probe](#probe-this-pc-the-best-settings-by-test-boots) found works best
+on this PC, and before the first probe what the manager detected at start-up:
+the hardware accelerator if there is one, else TCG. On Windows the manager
+checks WHPX by starting a paused, diskless QEMU for 2.5 s; on Linux it checks
+that `/dev/kvm` is usable; on an Intel Mac it probes HVF. Apple Silicon Macs
+run the x86 guests with TCG. QEMU is always given TCG as a second choice, so it
+falls back by itself if the first one cannot start, and the manager records and
+shows the accelerator actually in use (Overview, and `accel` in the MCP results).
+
+### Probe this PC: the best settings by test boots
+
+Starting QEMU with an accelerator proves little: on a Windows 10 laptop
+(i7-8550U, QEMU 11.1) QEMU started fine with WHPX and the CPU model this manager
+used until 2.2, yet every Linux guest kernel then panicked 0.3 s into its boot
+(`fpstate_reset`, the FPU/XSAVE setup) - the VM looked like it ran and showed a
+frozen screen. Hardware acceleration is a speed-up, never a requirement, so the
+manager now **measures** what works:
+
+- **The probe** boots a small Linux guest (the microVM kernel) on q35 with
+  2 vCPUs under each candidate setting and runs a self-check inside: the CPU
+  flags, two floating-point jobs at once (the FPU state is saved and restored
+  across switches on both vCPUs) and a checksum. A candidate passes only with
+  the exact expected results; a kernel panic, a hypervisor fault, a QEMU error
+  or a timeout fails it, at once.
+- **The candidates**, best first: under WHPX the host CPU; the host CPU without
+  XSAVE and the AVX family that needs it; the old flag model; x86-64-v2 flags;
+  then the same with Hyper-V's LAPIC (`-M pic=off`, QEMU's advice for Windows
+  10) or `kernel-irqchip=off`; QEMU's default model; and TCG (`-cpu max`) as the
+  always-working reference. Under KVM or HVF: the host CPU, `max`, TCG. The
+  first one that passes is used by every VM, appliance and container whose
+  accelerator is automatic, and the microVM engine measures its clock again
+  with it.
+- **When**: setup runs it once (after the microVM kernel, which it boots); the
+  Setup card has **Probe this PC** / **Probe again**, and so do
+  `POST /api/host/probe` and the MCP tool `probe_host`. It takes 1-3 minutes,
+  most of it the TCG reference. The result (`host-probe.json`) belongs to this
+  QEMU, CPU and Windows build: when one of them changes, VMs go back to the
+  built-in defaults until the next probe.
+- **If the hypervisor still stops a guest later** (QEMU 11.1 *pauses* a VM
+  whose guest hit a fatal fault under WHPX; older QEMU exits), the manager
+  notices within about 10 s, restarts that VM under TCG at once and shows why
+  on its Overview. It stays on TCG until you choose an accelerator in its
+  Settings; a VM you pinned to WHPX only gets the error recorded.
+
+Measured on that laptop (Windows 10 22H2, QEMU 11.1): the host CPU and the old
+model panicked; the host CPU without XSAVE/AVX passed (kept: it has every other
+host feature - BMI2, MOVBE, RDRAND...); x86-64-v2 passed in about 6 s; TCG passed
+in 77 s - so WHPX, used the right way, is about 13x faster here.
 
 **Why WHPX stays the automatic choice on Windows.** It boots about 7x faster
 than TCG. In end-to-end testing it completed 4 base builds and more than 40
@@ -1921,6 +1962,7 @@ JSON, 500 unexpected. Input is checked before anything starts: bad input is a
 | `GET /api/vm/docker?name=` | Docker state: containers (with their URLs), images, networks, volumes |
 | `GET /api/vm/docker/logs?name=&container=&tail=` | `{text, truncated}`; `tail` 250 by default |
 | `GET /api/about` | version, data folder, node path, `mcpServer`, `mcpConfig` (the Connect Claude snippet) |
+| `GET /api/host/probe` | `{probe, state, key}`: the last [host probe](#probe-this-pc-the-best-settings-by-test-boots) (every candidate with `ok`, `bootMs`, `flags`, `error`), `state` `{probed, current, best, summary, probedAt}` (`current`: it still applies to this QEMU, CPU and OS), and this PC's `key`; `/api/state` carries `hostProbe` (= `state`) |
 | `GET /api/session/stream?id=&token=&since=` | Server-Sent Events: `{t, n}` output chunks (`n` = byte offset; reconnect with `since=n`), `{exit}` at the end |
 | `GET /api/vm/screenshot?name=` | the screen of a running appliance VM as `image/png` (QEMU's `screendump`) |
 | `GET /api/vm/screen-text?name=&scale=` | the same screen read by OCR (the engine built into Windows 10/11): `{text, lines: [{text, x, y, w, h}], width, height, scale, ms, language, engine}`; `scale` 1-3 enlarges it first (default 2 up to 2000 px wide). 501 `OCR_UNAVAILABLE` on Linux and macOS, or when Windows has no OCR language |
@@ -2000,6 +2042,7 @@ once; follow the task with `GET /api/task?id=`.
 | `POST /api/install/qemu` | `{}`: install or update QEMU (Windows; all VMs and containers stopped) |
 | `POST /api/install/base` | `{}`: download Alpine if needed and build the base |
 | `POST /api/install/kernel` | `{update?}`: the microVM kernel (verified Alpine linux-virt + busybox-static; reuses verified packages already downloaded; `update` checks the Alpine index for a newer one) |
+| `POST /api/host/probe` | `{tcg? (true), quick?, only?: ["host", "v2", ...]}`: [probe this PC](#probe-this-pc-the-best-settings-by-test-boots) - test boots under each candidate setting; result `{best, summary, probedAt, results}`. Needs QEMU and the microVM kernel (409 `PREREQ_MISSING` / `NO_KERNEL`) |
 | `POST /api/container/start` | `{id, fresh?}`: boot an existing container again. A disk root keeps its writable layer and its image (by config digest); `fresh: true` drops the layer and looks the image up again. A RAM root starts from the clean image |
 | `POST /api/container/stop` | `{id, timeoutS?, force?}`: accepted while the container is still being pulled or booted; result `{id, exitCode, how, ms}` |
 | `POST /api/image/pull` | `{image}`: pull (or refresh) an image into the cache |

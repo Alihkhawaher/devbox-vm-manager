@@ -470,12 +470,13 @@ test('one-click setup: refuses early what it cannot do, skips what is done (no d
     const t = { id: 't1', log: (m) => lines.push(m), step: (m) => lines.push('STEP ' + m), warn: (m) => lines.push('WARN ' + m) };
     const r = await install.opSetup(t, { installQemu: false });
     assert.equal(r.ready, true);
+    // the host probe boots the microVM kernel: none here (ensureKernel is a stub), so it is skipped
     assert.deepEqual(r.steps, [
       { step: 'ssh-key', done: 'already there' }, { step: 'qemu', done: 'already there' },
-      { step: 'kernel', done: 'already there' },
+      { step: 'kernel', done: 'already there' }, { step: 'probe', done: 'skipped (no kernel)' },
       { step: 'alpine', done: 'not needed' }, { step: 'base', done: 'already there' },
     ]);
-    assert.equal(lines.filter((l) => /^STEP Step \d\/5/.test(l)).length, 5, 'five numbered steps: ' + lines.join(' | '));
+    assert.equal(lines.filter((l) => /^STEP Step \d\/6/.test(l)).length, 6, 'six numbered steps: ' + lines.join(' | '));
     assert.ok(lines.some((l) => /Docker images can run now/.test(l)));
     assert.ok(!fs.existsSync(CFG.alpine), 'the Alpine image was not downloaded');
 
@@ -487,8 +488,8 @@ test('one-click setup: refuses early what it cannot do, skips what is done (no d
     lines.length = 0;
     const m = await install.opSetup(t, { installQemu: false, only: 'microvm' });
     assert.equal(m.only, 'microvm');
-    assert.deepEqual(m.steps, [{ step: 'qemu', done: 'already there' }, { step: 'kernel', done: 'already there' }]);
-    assert.equal(lines.filter((l) => /^STEP Step \d\/2/.test(l)).length, 2, lines.join(' | '));
+    assert.deepEqual(m.steps, [{ step: 'qemu', done: 'already there' }, { step: 'kernel', done: 'already there' }, { step: 'probe', done: 'skipped (no kernel)' }]);
+    assert.equal(lines.filter((l) => /^STEP Step \d\/3/.test(l)).length, 3, lines.join(' | '));
 
     // a kernel failure: fatal for {only:'microvm'}, a warning in a full setup
     kernel.ensureKernel = async () => { throw new Error('no network'); };
