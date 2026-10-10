@@ -387,6 +387,7 @@
           <button type="button" class="sm" id="ovRestart">Restart</button>
           <button type="button" class="sm danger-outline" id="ovForce">Force stop</button>
           <button type="button" class="sm" id="ovTerminal">Open terminal</button>
+          <button type="button" class="sm" id="ovDisplay" hidden>Open in a window (3D, full speed)</button>
           <button type="button" class="sm" id="ovCopySsh">Copy SSH command</button>
           <button type="button" class="sm" id="ovEject" hidden>Remove CD-ROM</button>
           <button type="button" class="sm danger" id="ovForget" hidden>Remove record</button>
@@ -408,6 +409,13 @@
             <div><label for="sAccel">Acceleration</label><select id="sAccel"></select></div>
             <div><label for="sNote">Note</label><input id="sNote" maxlength="500" placeholder="what is this VM for?" autocomplete="off"></div>
           </div>
+          <div class="grid g-set mt" id="sApBlock" hidden>
+            <div><label for="sDisplay">Screen</label><select id="sDisplay">
+              <option value="browser">In the browser (Screen tab)</option>
+              <option value="window">Window on this PC (3D, full speed)</option>
+            </select></div>
+            <div><label for="sSshUser">SSH user (the guest's own account)</label><input id="sSshUser" maxlength="32" placeholder="root" autocomplete="off" spellcheck="false"></div>
+          </div>
           <div class="checks">
             <label class="chk"><input type="checkbox" id="sAuto"> Start automatically with the manager</label>
             <label class="chk"><input type="checkbox" id="sEph"> Temporary VM (removed by "Delete all temporary VMs")</label>
@@ -419,8 +427,8 @@
             <button type="button" class="sm" id="sRestartNow" hidden>Restart now</button>
           </div>
           <div class="field-error" id="sErr" role="alert" hidden></div>
-          <div class="hint">Everything here can be saved at any time. Memory, vCPUs, acceleration and SSH
-            exposure of a running VM apply the next time it starts.</div>
+          <div class="hint">Everything here can be saved at any time. Memory, vCPUs, acceleration, SSH
+            exposure and the screen of a running VM apply the next time it starts.</div>
         </div>
 
         <div class="section">
@@ -590,17 +598,28 @@
       <!-- ---- terminal ---- -->
       <div class="panel" role="tabpanel" id="p-terminal" aria-labelledby="tab-terminal" hidden>
         <div class="termbar">
-          <label class="inline" for="tUser">User</label>
-          <select id="tUser" class="auto">
-            <option value="root">root</option>
-            <option value="dev">dev</option>
-          </select>
+          <span class="inrow" id="tStdLogin">
+            <label class="inline" for="tUser">User</label>
+            <select id="tUser" class="auto">
+              <option value="root">root</option>
+              <option value="dev">dev</option>
+            </select>
+          </span>
+          <span class="inrow" id="tApLogin" hidden>
+            <label class="inline" for="tApUser">User</label>
+            <input id="tApUser" class="auto" size="10" maxlength="32" autocomplete="off" spellcheck="false">
+            <label class="inline" for="tApPass">Password</label>
+            <input id="tApPass" type="password" class="auto" size="14" maxlength="1024" autocomplete="new-password">
+          </span>
           <button type="button" class="sm primary" id="tConnect">Connect</button>
           <button type="button" class="sm" id="tDisconnect" disabled>Disconnect</button>
           <span class="tstatus" id="tStatus" role="status">Not connected</span>
         </div>
         <div class="termwrap"><div class="term" id="tTerm"></div></div>
         <div class="hint" id="tCmd"></div>
+        <div class="hint" id="tApHint" hidden>This logs in to the guest's own SSH server with its own account: switch SSH on inside the
+          guest first (LibreELEC: Settings &gt; LibreELEC &gt; Services &gt; Enable SSH). The password is used for this connection only and is
+          never stored.</div>
       </div>
 
       <!-- ---- serial console ---- -->
@@ -632,6 +651,12 @@
           <button type="button" class="sm" id="svText" disabled title="Read the screen with the OCR built into Windows">Screen as text</button>
           <button type="button" class="sm" id="svFull" disabled>Full screen</button>
         </div>
+        <div class="note mt" id="svWindowNote" hidden>
+          <b>This VM's screen is a window on this PC</b>: 3D graphics at full speed, on this PC's graphics card. Find it as
+          <span class="mono" id="svWindowTitle">QEMU</span> in the taskbar. Ctrl+Alt+F toggles full screen there, Ctrl+Alt+G releases the mouse.
+          Keys, Save screenshot and Screen as text work from here too.
+          <div class="btns mt"><button type="button" class="sm" id="svToBrowser">Show it in the browser instead (restarts the VM)</button></div>
+        </div>
         <div class="screenwrap" id="svWrap"><div class="screen" id="svScreen" tabindex="0" aria-label="VM screen"></div></div>
         <div class="hint">Click the screen to type into the VM; the mouse works as a tablet (the pointer is where you point).
           Sound plays on this PC's speakers. The screen is relayed only to this browser through the manager (token checked),
@@ -642,15 +667,17 @@
     <!-- ============ CREATE AN APPLIANCE ============ -->
     <section class="card" aria-labelledby="apTitle">
       <h2 id="apTitle">Create an appliance VM</h2>
-      <p class="hint">Boot any operating-system image with a screen instead of SSH: a <span class="mono">.img</span>, <span class="mono">.img.gz</span>,
+      <p class="hint">Boot any operating-system image with a screen: a <span class="mono">.img</span>, <span class="mono">.img.gz</span>,
         <span class="mono">.qcow2</span> disk image or a <span class="mono">.iso</span> installer, from a file on this PC or an https:// link
-        (downloaded once into the data folder). A media box like LibreELEC, a router firmware, a rescue system...</p>
+        (downloaded once into the data folder). A desktop Linux, a media box like LibreELEC, a router firmware, a rescue system...
+        The screen shows in the browser, or in a window on this PC with 3D graphics at full speed (what Kodi and other OpenGL programs need).</p>
       <div class="grid g-appl">
         <div><label for="apName">Name</label><input id="apName" placeholder="kodi" autocomplete="off" spellcheck="false"></div>
         <div class="span2"><label for="apSource">Image file or https:// URL</label><input id="apSource" placeholder="D:\Downloads\LibreELEC-Generic.x86_64-12.2.1.img.gz" autocomplete="off" spellcheck="false"></div>
         <div><label for="apFw">Firmware</label><select id="apFw"><option value="uefi">UEFI (edk2)</option><option value="bios">BIOS (SeaBIOS)</option></select></div>
         <div><label for="apBus">Disk bus</label><select id="apBus"><option value="virtio">virtio (Linux)</option><option value="sata">SATA (other OS)</option></select></div>
-        <div><label for="apVga">Display</label><select id="apVga"><option value="virtio">virtio-vga (Linux)</option><option value="std">plain VGA</option></select></div>
+        <div><label for="apVga">Graphics</label><select id="apVga"><option value="virtio">virtio-vga (Linux)</option><option value="std">plain VGA</option></select></div>
+        <div><label for="apDisplay">Screen</label><select id="apDisplay"><option value="browser">In the browser</option><option value="window">Window on this PC (3D)</option></select></div>
         <div><label for="apDisk">Disk (GB)</label><input id="apDisk" type="number" step="1" inputmode="numeric" value="8"></div>
         <div><label for="apMem">Memory (MB)</label><input id="apMem" type="number" step="128" inputmode="numeric"></div>
         <div><label for="apCpu">vCPUs</label><input id="apCpu" type="number" step="1" inputmode="numeric"></div>

@@ -1315,7 +1315,7 @@
     if (sha && !/^[0-9a-f]{64}$/.test(sha)) return showErr(err, 'The sha256 is 64 hex characters.', $('#apSha'));
     hideErr(err);
     await runTask('/api/vm/create-appliance', {
-      name: name, source: source, sha256: sha || undefined, firmware: $('#apFw').value, bus: $('#apBus').value, vga: $('#apVga').value,
+      name: name, source: source, sha256: sha || undefined, firmware: $('#apFw').value, bus: $('#apBus').value, vga: $('#apVga').value, display: $('#apDisplay').value,
       diskGB: diskGB, mem: mem, cpus: cpus, sound: $('#apSound').checked, install: $('#apInstall').checked,
       start: $('#apStart').checked, ephemeral: $('#apTemp').checked, createdBy: 'gui',
     }, {
@@ -1378,7 +1378,7 @@
   }
   function vmTags(v) {
     const out = [];
-    if (isAppliance(v)) out.push(h('span', { class: 'tag appl', title: 'An appliance: its own OS image with a screen, no SSH' }, 'appliance'));
+    if (isAppliance(v)) out.push(h('span', { class: 'tag appl', title: 'An appliance: its own OS image with a screen (SSH when the guest runs its own server)' }, 'appliance'));
     if (v.ephemeral) out.push(h('span', { class: 'tag temp', title: 'Removed by "Delete all temporary VMs"' }, 'temporary'));
     if (/^(mcp|claude)/.test(v.createdBy || '')) out.push(h('span', { class: 'tag claude', title: 'Created by Claude through the MCP server' }, 'Claude'));
     if (v.autostart) out.push(h('span', { class: 'tag', title: 'Starts with the manager' }, 'autostart'));
@@ -1407,8 +1407,7 @@
     const sshKey = v.kind + '|' + v.port + '|' + v.sshLan;
     if (r.sshKey !== sshKey) {
       r.sshKey = sshKey;
-      if (isAppliance(v)) setChildren(r.ssh, h('span', { class: 'small', title: 'An appliance has a screen instead of SSH' }, 'screen'));
-      else setChildren(r.ssh, String(v.port), v.sshLan ? exposureTag(true) : null);
+      setChildren(r.ssh, isAppliance(v) ? h('span', { title: 'The guest\'s own SSH server, when it runs one' }, String(v.port)) : String(v.port), v.sshLan ? exposureTag(true) : null);
     }
     setText(r.res, v.mem + ' MB · ' + v.cpus + ' vCPU');
     setText(r.disk, fmtBytes(v.diskBytes));
@@ -1469,8 +1468,9 @@
   let CURRENT = null;
   let TAB = 'overview';
   const TABS = ['overview', 'settings', 'docker', 'network', 'terminal', 'serial', 'screen'];
-  // tabs an appliance VM (any OS with a screen, no SSH) does not have, and the one only it has
-  const SSH_TABS = ['docker', 'terminal'];
+  // the tab an appliance VM (any OS with a screen) does not have; its Terminal
+  // logs in to the guest's own SSH server with the guest's account
+  const NOT_APPLIANCE_TABS = ['docker'];
   const isAppliance = (v) => !!(v && v.kind === 'appliance');
 
   function selectVm(name, tab) {
@@ -1507,6 +1507,13 @@
     fillSettings(v, true);
     fillPorts(v.ports || [], true);
     $('#tUser').value = 'root';
+    const appl = isAppliance(v);
+    $('#tStdLogin').hidden = appl;
+    $('#tApLogin').hidden = !appl;
+    $('#tApHint').hidden = !appl;
+    $('#sApBlock').hidden = !appl;
+    $('#tApUser').value = appl ? ((v.appliance && v.appliance.sshUser) || 'root') : '';
+    $('#tApPass').value = '';
   }
   function closeDetail() {
     leaveVm();
@@ -1516,7 +1523,7 @@
   }
 
   function tabsFor(v) {
-    return TABS.filter((t) => (isAppliance(v) ? SSH_TABS.indexOf(t) === -1 : t !== 'screen'));
+    return TABS.filter((t) => (isAppliance(v) ? NOT_APPLIANCE_TABS.indexOf(t) === -1 : t !== 'screen'));
   }
   function showTab(which) {
     const v = CURRENT ? VMS.get(CURRENT) : null;
@@ -1621,7 +1628,12 @@
     $('#ovForce').hidden = !(up || v.status === 'stopping');
     $('#ovTerminal').disabled = v.status !== 'running';
     setText($('#ovTerminal'), isAppliance(v) ? 'Open screen' : 'Open terminal');
-    $('#ovCopySsh').hidden = isAppliance(v);
+    // an appliance: switch between the browser view and a window on this PC
+    const inWindow = isAppliance(v) && v.appliance && v.appliance.display === 'window';
+    $('#ovDisplay').hidden = !isAppliance(v) || v.status === 'missing';
+    setText($('#ovDisplay'), (up ? (inWindow ? 'Show in the browser' : 'Open in a window') : (inWindow ? 'Start in the browser' : 'Start in a window')) + (inWindow ? '' : ' (3D, full speed)'));
+    $('#ovDisplay').disabled = !!v.busy || v.status === 'stopping' || v.status === 'booting';
+    $('#ovCopySsh').hidden = false;
     $('#ovEject').hidden = !(isAppliance(v) && v.appliance && v.appliance.media !== 'disk');
     setText($('#ovEject'), isAppliance(v) && v.appliance && v.appliance.media === 'iso' ? 'Remove CD-ROM' : 'Remove installation media');
     $('#ovEject').disabled = isUp(v) || !!v.busy;
@@ -1638,7 +1650,11 @@
       kv('Status', [statusPill(v), busyTask ? h('span', { class: 'small' }, '  ' + (busyTask.title || 'working') + (busyTask.step ? ': ' + busyTask.step : '')) : null]);
       if (isAppliance(v)) {
         const ap = v.appliance || {};
-        kv('Screen', v.screen ? h('a', { href: '#', class: 'lnk' }, 'open the Screen tab') : h('span', { class: 'small' }, 'shown while the VM runs (Screen tab)'));
+        kv('Screen', v.window ? [h('b', null, 'a window on this PC'), ' - 3D graphics, full speed (', h('span', { class: 'mono' }, 'QEMU (' + v.name + ')'), ' in the taskbar)']
+          : (v.screen ? h('a', { href: '#', class: 'lnk' }, 'open the Screen tab')
+            : h('span', { class: 'small' }, ap.display === 'window' ? 'a window on this PC while the VM runs (3D graphics, full speed)' : 'shown while the VM runs (Screen tab)')));
+        kv('SSH', [h('span', { class: 'mono' }, v.sshCommand || ''), ' ', exposureTag(v.sshLan),
+          h('div', { class: 'small' }, 'the guest\'s own SSH server and account, when it runs one - the Terminal tab logs in with its password')]);
         kv('Firmware / disk / display', (ap.firmware === 'bios' ? 'BIOS (SeaBIOS)' : 'UEFI (edk2)') + ' / ' + (ap.bus === 'sata' ? 'SATA' : 'virtio') + ' / ' + (ap.vga === 'std' ? 'plain VGA' : 'virtio-vga') + (ap.sound ? ', sound on' : ', no sound'));
         kv('Image', h('span', { class: 'mono', title: ap.source || '' }, ap.sourceName || ap.source || ''));
         if (ap.media === 'iso') kv('CD-ROM', h('span', { class: 'badge warn' }, 'the installer ISO is attached - remove it once the OS is installed (button below)'));
@@ -1700,6 +1716,33 @@
       p.owner ? '  (' + p.owner + ')' : '', ' ', exposureTag(p.lan)));
   }
 
+  // An appliance's screen: the browser view (VNC, the Screen tab) or a window
+  // on this PC (3D graphics, full speed). Saved, then the VM is restarted (it
+  // runs) or started (it does not): QEMU opens its screen at start only.
+  async function switchDisplay(v, to, b) {
+    const name = v.name, up = isUp(v);
+    const what = to === 'window' ? 'in a window on this PC (3D graphics, full speed)' : 'in the browser (Screen tab)';
+    if (up && !await openModal({
+      title: 'Restart "' + name + '" to show its screen ' + (to === 'window' ? 'in a window' : 'in the browser') + '?',
+      hint: 'The VM is shut down (ACPI power-off, like the power button) and started again with its screen ' + what + '. ' +
+        (to === 'window' ? 'The window opens on the PC that runs the manager; the browser view is off meanwhile.' : 'The window closes.'),
+      submitLabel: 'Restart',
+    })) return;
+    const undo = busyButton(b);
+    try {
+      const r = await post('/api/vm/settings', { name: name, display: to });
+      LOCAL_WRITE_AT = Date.now();
+      if (r.vm) { VMS.set(name, r.vm); if (name === CURRENT) fillSettings(r.vm, true); }
+    } catch (e) {
+      undo();
+      if (!e.auth) toast('Could not change the screen: ' + e.message, 'err');
+      return;
+    }
+    undo();
+    await runTask(up ? '/api/vm/restart' : '/api/vm/start', { name: name }, { btn: b });
+    pokePoll(0);
+  }
+
   // ---- settings form: dirty-tracked, sends only what changed (MNT-4) ----
   const SET_FIELDS = {
     mem: { sel: '#sMem', get: (el) => toInt(el.value), set: (el, x) => { el.value = x === null || x === undefined ? '' : String(x); } },
@@ -1709,17 +1752,23 @@
     autostart: { sel: '#sAuto', get: (el) => el.checked, set: (el, x) => { el.checked = !!x; } },
     ephemeral: { sel: '#sEph', get: (el) => el.checked, set: (el, x) => { el.checked = !!x; } },
     sshLan: { sel: '#sSshLan', get: (el) => el.checked, set: (el, x) => { el.checked = !!x; } },
+    // appliance VMs only
+    display: { sel: '#sDisplay', appliance: true, get: (el) => el.value, set: (el, x) => { el.value = x; } },
+    sshUser: { sel: '#sSshUser', appliance: true, get: (el) => el.value.trim(), set: (el, x) => { el.value = x; } },
   };
+  const fieldsFor = (v) => Object.keys(SET_FIELDS).filter((k) => !SET_FIELDS[k].appliance || isAppliance(v));
   let SET_ORIG = {};
   function serverVal(v, k) {
     if (k === 'note') return v.note || '';
     if (k === 'accel') return v.accel || 'auto';
     if (k === 'autostart' || k === 'ephemeral' || k === 'sshLan') return !!v[k];
+    if (k === 'display') return (v.appliance && v.appliance.display) || 'browser';
+    if (k === 'sshUser') return (v.appliance && v.appliance.sshUser) || 'root';
     return v[k];
   }
   function fillSettings(v, force) {
     syncAccelSelect(v);
-    for (const k of Object.keys(SET_FIELDS)) {
+    for (const k of fieldsFor(v)) {
       const f = SET_FIELDS[k], el = $(f.sel);
       const server = serverVal(v, k);
       if (force) { f.set(el, server); SET_ORIG[k] = server; continue; }
@@ -1779,7 +1828,7 @@
     const err = $('#sErr');
     const body = { name: name };
     let changed = 0;
-    for (const k of Object.keys(SET_FIELDS)) {
+    for (const k of fieldsFor(v)) {
       const val = SET_FIELDS[k].get($(SET_FIELDS[k].sel));
       if (val !== serverVal(v, k)) { body[k] = val; changed++; }
     }
@@ -1794,7 +1843,7 @@
       if (name !== CURRENT) return;
       if (r.vm) { VMS.set(name, r.vm); fillSettings(r.vm, true); }
       const restartNeeded = r.pendingRestart && r.vm && isUp(r.vm);
-      toast(restartNeeded ? 'Saved. Memory, vCPUs, acceleration and SSH exposure apply the next time the VM starts.' : 'Settings saved', 'ok');
+      toast(restartNeeded ? 'Saved. Memory, vCPUs, acceleration, SSH exposure and the screen apply the next time the VM starts (Restart now).' : 'Settings saved', 'ok');
       pokePoll(0);
     } catch (e) {
       if (!e.auth) showErr(err, e.message);
@@ -2577,7 +2626,12 @@
       this.updateButtons();
       this.fit();
       const body = { name: vm, kind: this.kind, cols: this.term.cols, rows: this.term.rows };
-      if (this.userSel) body.user = this.userSel.value;
+      const tv = VMS.get(vm);
+      if (this.kind === 'ssh' && isAppliance(tv)) {
+        // the guest's own account; the password goes to this one connection
+        body.user = $('#tApUser').value.trim() || (tv.appliance && tv.appliance.sshUser) || 'root';
+        if ($('#tApPass').value) body.password = $('#tApPass').value;
+      } else if (this.userSel) body.user = this.userSel.value;
       if (old && !old.ended) { old.ended = true; body.replace = old.id; }
       this.setStatus('Connecting...', 'busy');
       let r;
@@ -2773,7 +2827,12 @@
       $('#svConnect').addEventListener('click', () => { if (CURRENT) this.connect(CURRENT); });
       $('#svDisconnect').addEventListener('click', () => this.disconnect(false));
       $('#svScale').addEventListener('change', () => { if (this.conn) this.conn.setScale($('#svScale').checked); });
-      $('#svCad').addEventListener('click', () => { if (this.conn) this.conn.ctrlAltDel(); });
+      $('#svCad').addEventListener('click', () => {
+        if (this.conn) { this.conn.ctrlAltDel(); return; }
+        // the window view: through the monitor, like every key from here
+        if (CURRENT) post('/api/vm/keys', { name: CURRENT, keys: ['ctrl-alt-delete'] }).catch((e) => { if (!e.auth) toast('Could not send Ctrl+Alt+Del: ' + e.message, 'err'); });
+      });
+      $('#svToBrowser').addEventListener('click', (e) => { const v = CURRENT ? VMS.get(CURRENT) : null; if (v) switchDisplay(v, 'browser', e.currentTarget); });
       $('#svShot').addEventListener('click', () => this.screenshot());
       $('#svText').addEventListener('click', (e) => this.asText(e.currentTarget));
       $('#svFull').addEventListener('click', () => {
@@ -2855,13 +2914,20 @@
     updateButtons() {
       const v = CURRENT ? VMS.get(CURRENT) : null;
       const can = !!(v && v.screen);
-      $('#svText').disabled = !can;
+      // shown in a window on this PC: no browser view, but keys, screenshot and text
+      const win = !!(v && v.window);
+      $('#svWindowNote').hidden = !win;
+      $('#svWrap').hidden = win;
+      if (win) setText($('#svWindowTitle'), 'QEMU (' + v.name + ')');
+      $('#svToBrowser').disabled = !!(v && v.busy);
+      $('#svText').disabled = !(can || win);
       $('#svConnect').disabled = !can || !!this.conn;
       $('#svDisconnect').disabled = !this.conn;
-      $('#svCad').disabled = !this.conn;
+      $('#svCad').disabled = !(this.conn || win);
       $('#svFull').disabled = !this.conn;
-      $('#svShot').disabled = !can;
-      if (!can && !this.conn) this.setStatus(v && v.status === 'booting' ? 'Starting...' : 'The VM is not running');
+      $('#svShot').disabled = !(can || win);
+      if (win && !this.conn) this.setStatus('The screen is a window on this PC');
+      else if (!can && !this.conn) this.setStatus(v && v.status === 'booting' ? 'Starting...' : 'The VM is not running');
     }
   }
 
@@ -4914,6 +4980,10 @@
       runTask('/api/vm/eject', { name: CURRENT }, { btn: b });
     });
     onClick('#ovCopySsh', () => { const v = VMS.get(CURRENT); if (v && v.sshCommand) copyText(v.sshCommand, 'the SSH command'); });
+    onClick('#ovDisplay', (b) => {
+      const v = VMS.get(CURRENT);
+      if (v && isAppliance(v)) switchDisplay(v, v.appliance && v.appliance.display === 'window' ? 'browser' : 'window', b);
+    });
     onClick('#ovForget', () => forgetVm(CURRENT));
     onClick('#sSave', saveSettings);
     onClick('#sRestartNow', (b) => runTask('/api/vm/restart', { name: CURRENT }, { btn: b }));

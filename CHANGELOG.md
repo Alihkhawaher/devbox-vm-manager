@@ -1,5 +1,64 @@
 # Changelog
 
+## 2.3.0
+
+**Appliance VMs: a window with 3D graphics at full speed, and SSH to the
+guest's own server.**
+
+- **Screen: in the browser or in a window on this PC.** An appliance VM has a
+  new setting `display` (create card, Settings, `POST /api/vm/settings`,
+  `create_appliance_vm`, `start_vm(display=...)`). `window` opens the screen
+  as a QEMU window on the PC that runs the manager with the 3D GPU
+  `virtio-vga-gl`: the guest's OpenGL runs on this PC's graphics card through
+  virgl. Kodi needs it (LibreELEC has no software OpenGL: on a plain VGA it
+  stops with "failed to initialize egl"). The Overview's **Open in a window
+  (3D, full speed)** / **Show in the browser** saves the setting and restarts
+  (or starts) the VM. The window display is chosen from what the QEMU build
+  offers (`-device help`, `-display help`): GTK with OpenGL ES on Windows, GTK
+  or SDL in a desktop session on Linux, Cocoa without 3D on macOS. QEMU passes
+  the window's size to the guest as its screen size, and GTK opens the window
+  at the firmware's 640x480 (Kodi came up at 640x480), so on Windows the
+  manager sizes the new window right after the start (1280x800 for the
+  picture, at most 90 % of the screen): Kodi then drew at 1321x825 in a
+  1321-pixel-wide window. Zoom-to-fit scales the picture when the window is
+  resized later. Closing the window does not stop the VM (its close button is
+  off: it would cut the guest's power).
+- **Why 3D cannot be shown in the browser on Windows**: QEMU passes GL frames
+  to VNC only through `egl-headless`, which allocates its copy texture as RGBA
+  filled with BGRA data - accepted by desktop OpenGL, refused by OpenGL ES,
+  which is what QEMU has on Windows (ANGLE). The VNC picture stayed black
+  under ANGLE's Direct3D 11 and 9 back-ends while Kodi drew correctly in the
+  guest and in a GTK window; ANGLE's Vulkan back-end crashed QEMU and its
+  OpenGL back-end needs a WGL extension the AMD driver lacks. QEMU also
+  refuses VNC next to a GL window.
+- **Screenshots, Screen as text and keys of a VM in a window**:
+  `lib/wincap.js` + `lib/assets/window-helper.ps1` capture QEMU's window
+  (PrintWindow with full content: GL included, covered windows too; a
+  minimized one is restored without the focus and minimized again) as the
+  PPM QEMU's screendump writes, so screenshot and OCR work as before (about a
+  second per picture, Windows only). Keys go through the monitor in both
+  views. The WebSocket relay answers 409 `IN_WINDOW`.
+- **SSH to an appliance**: its SSH port is now forwarded to the guest's port
+  22 (this PC only, or the LAN), the Overview shows `ssh -p <port>
+  <user>@127.0.0.1` with **Copy SSH command**, and the **Terminal** tab logs in
+  with the guest's own account (`sshUser`, default root) and a password typed
+  above it. The manager's key is offered first; the password reaches ssh
+  only through `SSH_ASKPASS` (`lib/assets/askpass.js`: a one-time file in the
+  private run folder, printed once and deleted; gone after 60 s anyway), is
+  never stored, and lives in memory only while the session does (resizes log
+  in again). Without a password: key only, batch mode. A guest without `stty`
+  (LibreELEC) gets the terminal size as `COLUMNS`/`LINES`.
+- Tested on Windows 10 with QEMU 11.1, WHPX and a Radeon RX 550: LibreELEC
+  12.2.1's Kodi in a window with 3D (`GL_RENDERER = virgl (ANGLE (AMD, Radeon
+  (TM) RX 550 ... Direct3D...))`), its first-run wizard driven through
+  `send_keys` and Screen as text on the captured window, SSH switched on
+  there, and the Terminal tab logged in as root with the password. Kodi's
+  VA-API probe is refused by the host (`CREATE_VIDEO_BUFFER: 22`) but only
+  breaks that probe's own GPU context.
+- Tests: `tests/appliance-window.test.js` (window display choice, QEMU
+  arguments, settings, guest SSH arguments, the askpass helper, sessions,
+  screen routing; `WINCAP_E2E=1` captures and sizes a real window).
+
 ## 2.2.0
 
 **Appliance VMs: boot any operating-system image with a screen - and a probe

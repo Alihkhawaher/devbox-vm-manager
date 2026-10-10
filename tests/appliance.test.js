@@ -76,9 +76,10 @@ test('qemuArgs: virtio disk + UEFI + VNC on the private endpoint + tablet + soun
   assert.match(line, /-vnc 127\.9\.8\.7:23/);
 });
 
-test('netdevFor: no SSH forward for an appliance, the user forwards stay', () => {
+test('netdevFor: an appliance forwards SSH to its own port 22 (LAN when chosen), the user forwards stay', () => {
   const a = st.newVmRecord({ kind: 'appliance', appliance: {}, port: 2250, ports: [{ host: 18080, guest: 8080, lan: false }] });
-  assert.equal(vm.netdevFor(a), 'user,id=n0,hostfwd=tcp:127.0.0.1:18080-:8080');
+  assert.equal(vm.netdevFor(a), 'user,id=n0,hostfwd=tcp:127.0.0.1:2250-:22,hostfwd=tcp:127.0.0.1:18080-:8080');
+  assert.match(vm.netdevFor(st.newVmRecord({ kind: 'appliance', appliance: {}, port: 2251, sshLan: true })), /^user,id=n0,hostfwd=tcp:0\.0\.0\.0:2251-:22$/);
   const n = st.newVmRecord({ port: 2250 });
   assert.match(vm.netdevFor(n), /hostfwd=tcp:127\.0\.0\.1:2250-:22/);
 });
@@ -86,14 +87,14 @@ test('netdevFor: no SSH forward for an appliance, the user forwards stay', () =>
 test('the record: kind, the appliance block with defaults, template "" (standalone disk); an Alpine record has neither', () => {
   const a = st.newVmRecord({ kind: 'appliance', appliance: { firmware: 'bios', source: 'https://x/y.img.gz', sourceSha256: 'A'.repeat(64) }, template: '' });
   assert.equal(a.kind, 'appliance');
-  assert.deepEqual(a.appliance, { firmware: 'bios', bus: 'virtio', vga: 'virtio', sound: true, source: 'https://x/y.img.gz', sourceSha256: 'a'.repeat(64), media: 'disk' });
+  assert.deepEqual(a.appliance, { firmware: 'bios', bus: 'virtio', vga: 'virtio', sound: true, source: 'https://x/y.img.gz', sourceSha256: 'a'.repeat(64), media: 'disk', display: 'browser', sshUser: 'root' });
   assert.equal(a.template, '');
   const n = st.newVmRecord({});
   assert.equal(n.kind, 'alpine');
   assert.equal(n.appliance, null);
   // a bad appliance block never produces a bad record
   const b = st.newVmRecord({ kind: 'appliance', appliance: { firmware: 'coreboot', bus: 'ide', media: 'floppy' } });
-  assert.deepEqual(b.appliance, { firmware: 'uefi', bus: 'virtio', vga: 'virtio', sound: true, source: '', sourceSha256: null, media: 'disk' });
+  assert.deepEqual(b.appliance, { firmware: 'uefi', bus: 'virtio', vga: 'virtio', sound: true, source: '', sourceSha256: null, media: 'disk', display: 'browser', sshUser: 'root' });
   assert.equal(st.newVmRecord({ kind: 'appliance', appliance: { media: 'image' } }).appliance.media, 'image');
   // the display endpoint survives the runtime cleaning
   const r = st.newVmRecord({ runtime: { pid: 5, monitor: { host: '127.1.2.3', port: 4 }, serial: { host: '127.1.2.3', port: 5 }, display: { host: '127.1.2.3', port: 5901 } } });

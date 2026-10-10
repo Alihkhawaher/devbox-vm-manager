@@ -35,7 +35,7 @@ test('extractPtyMarker: finds and strips the OSC marker; only plain tty paths ar
 
 test('sshRemoteCommand: reports the pty, applies the size, execs a login shell - and is valid sh', () => {
   const c = sessions.sshRemoteCommand(132, 43);
-  assert.match(c, /stty cols 132 rows 43/);
+  assert.match(c, /stty cols 132 rows 43 2>\/dev\/null \|\| export COLUMNS=132 LINES=43;/);
   assert.match(c, /exec "\$\{SHELL:-\/bin\/sh\}" -l$/);
   assert.match(c, /devbox-pty/);
   if (SH) execFileSync(SH, ['-n'], { input: c, windowsHide: true });
