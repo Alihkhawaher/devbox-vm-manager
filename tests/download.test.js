@@ -84,6 +84,36 @@ test('download: a dropped connection, a stall, a checksum mismatch and HTTP erro
 });
 
 // (redirect targets go through the same check as the first URL)
+test('download: a redirect to a mirror that does not answer is retried from the start, so the next redirect can pick another mirror', async () => {
+  let hits = 0;
+  const s = await server((req, res) => {
+    if (req.url === '/mirror') {
+      hits++;
+      // the first answer sends us to a port nobody listens on; the second to the file
+      res.writeHead(302, { Location: hits === 1 ? 'http://127.0.0.1:1/down.bin' : '/ok.bin' });
+      return res.end();
+    }
+    routes(req, res);
+  });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devbox-dl-mirror-'));
+  const dest = path.join(dir, 'ok.bin');
+  const said = [];
+  try {
+    const r = await dl.download(s.url('/mirror'), dest, { allowHttp: true, sha512: SHA, label: 'image', t: { log: (m) => said.push(m) } });
+    assert.equal(r.bytes, BODY.length);
+    assert.equal(hits, 2, 'asked the download site again');
+    assert.ok(said.some((m) => /mirror 127\.0\.0\.1:1 did not answer .*asking 127\.0\.0\.1:\d+ for another \(1\/3\)/.test(m)), said.join('\n'));
+    // the plain message of a refused connection names the code, never a bare "AggregateError"
+    const { errMsg } = require('../lib/util');
+    const agg = new AggregateError([Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1'), { code: 'ECONNREFUSED' })], 'AggregateError');
+    assert.equal(errMsg(agg), 'connect ECONNREFUSED 127.0.0.1:1');
+    assert.equal(errMsg(Object.assign(new Error('getaddrinfo failed'), { code: 'ENOTFOUND' })), 'getaddrinfo failed (ENOTFOUND)');
+  } finally {
+    await s.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('download / fetchText refuse plain http (the manager only follows https)', async () => {
   const s = await server(routes);
   const dir = tmpDir();
