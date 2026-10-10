@@ -2767,6 +2767,7 @@
       $('#svScale').addEventListener('change', () => { if (this.conn) this.conn.setScale($('#svScale').checked); });
       $('#svCad').addEventListener('click', () => { if (this.conn) this.conn.ctrlAltDel(); });
       $('#svShot').addEventListener('click', () => this.screenshot());
+      $('#svText').addEventListener('click', (e) => this.asText(e.currentTarget));
       $('#svFull').addEventListener('click', () => {
         const w = $('#svWrap');
         if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
@@ -2825,9 +2826,28 @@
         setTimeout(() => URL.revokeObjectURL(a.href), 5000);
       } catch (e) { toast('Screenshot failed: ' + e.message, 'err'); }
     }
+    // the screen read by OCR (Windows): shown in a dialog, copyable
+    async asText(b) {
+      if (!CURRENT) return;
+      const name = CURRENT;
+      const undo = busyButton(b);
+      try {
+        const r = await api('/api/vm/screen-text?name=' + encodeURIComponent(name));
+        const text = r.text || '(no text recognised on the screen)';
+        await openModal({
+          title: 'Screen of "' + name + '" as text',
+          hint: 'Read by the OCR built into Windows in ' + r.ms + ' ms - expect small slips (u for v, @ for 0).',
+          content: h('pre', { tabindex: '0' }, text),
+          submitLabel: 'Copy', cancelLabel: 'Close', wide: true,
+          onSubmit: () => { copyText(text, 'the screen text'); return true; },
+        });
+      } catch (e) { toast('Screen as text failed: ' + e.message, 'err'); }
+      finally { undo(); }
+    }
     updateButtons() {
       const v = CURRENT ? VMS.get(CURRENT) : null;
       const can = !!(v && v.screen);
+      $('#svText').disabled = !can;
       $('#svConnect').disabled = !can || !!this.conn;
       $('#svDisconnect').disabled = !this.conn;
       $('#svCad').disabled = !this.conn;

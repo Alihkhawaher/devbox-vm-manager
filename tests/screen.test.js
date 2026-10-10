@@ -84,6 +84,20 @@ test('plain GET /api/vm/screen answers 426 with the WebSocket hint; the screensh
   const r2 = await request(s.port, { path: '/api/vm/screenshot?name=a', headers: auth });
   assert.equal(r2.status, 409);
   assert.equal(r2.json.code, 'NOT_RUNNING');
+  // the screen as text: the same refusals (off Windows it is 501 for every VM: there is no engine)
+  const txt = (n) => request(s.port, { path: '/api/vm/screen-text?name=' + n, headers: auth });
+  if (process.platform === 'win32') {
+    assert.equal((await txt('nope')).status, 404);
+    assert.equal((await txt('k')).status, 400, 'not an appliance');
+    const r3 = await txt('a');
+    assert.equal(r3.status, 409);
+    assert.equal(r3.json.code, 'NOT_RUNNING');
+  } else {
+    const r3 = await txt('a');
+    assert.equal(r3.status, 501);
+    assert.equal(r3.json.code, 'OCR_UNAVAILABLE');
+  }
+  assert.equal((await request(s.port, { path: '/api/vm/screen-text?name=a' })).status, 401, 'token required');
   // keys: the same checks, plus the key names
   const post = (body) => request(s.port, { method: 'POST', path: '/api/vm/keys', headers: Object.assign({ 'Content-Type': 'application/json' }, auth), body: body });
   assert.equal((await post({ name: 'a', keys: 'up ret' })).status, 409);

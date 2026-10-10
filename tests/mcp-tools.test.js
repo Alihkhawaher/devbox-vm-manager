@@ -65,6 +65,8 @@ function fakeManager(opts) {
     url: 'http://127.0.0.1:8777/', root: '/data', port: 8777, version: '2.0.0', started: !!opts.started,
     get: async (p) => {
       m.calls.push(['GET', p]);
+      // route prefix -> fn(path, m): extra GET routes a test answers itself
+      for (const k of Object.keys(opts.gets || {})) if (p.indexOf(k) === 0) return opts.gets[k](p, m);
       if (p === '/api/state') return JSON.parse(JSON.stringify(m.state));
       if (p.indexOf('/api/task?id=') === 0) {
         const id = decodeURIComponent(p.slice('/api/task?id='.length));
@@ -118,11 +120,11 @@ function toolsFor(m, extra) {
 // ---------------------------------------------------------------------------
 // the list
 // ---------------------------------------------------------------------------
-test('the 34 tools (spec section 13 + microVM spec 13 + shares spec 7 + appliance VMs), each with a healthy schema and honest annotations', () => {
+test('the 36 tools (spec section 13 + microVM spec 13 + shares spec 7 + appliance VMs and their screen), each with a healthy schema and honest annotations', () => {
   const s = createServer({ name: 'devbox-vms', version: '2.0.0' });
   for (const t of T.createTools({ connect: async () => { throw new Error('unused'); } })) s.addTool(t);
   const listed = s.listTools();
-  assert.equal(listed.length, 34);
+  assert.equal(listed.length, 36);
   assert.deepEqual(listed.map((t) => t.name), T.TOOL_NAMES);
   for (const t of listed) {
     assert.deepEqual(schemaProblems(t), [], t.name);
@@ -132,7 +134,7 @@ test('the 34 tools (spec section 13 + microVM spec 13 + shares spec 7 + applianc
     assert.ok(t.title, t.name + ' has a title');
   }
   const ro = listed.filter((t) => t.annotations.readOnlyHint).map((t) => t.name).sort();
-  assert.deepEqual(ro, ['get_task', 'image_logs', 'list_containers', 'list_images', 'list_shares', 'list_vms', 'read_file', 'screenshot_vm', 'serial_log', 'status']);
+  assert.deepEqual(ro, ['get_task', 'image_logs', 'list_containers', 'list_images', 'list_shares', 'list_vms', 'read_file', 'screen_text', 'screenshot_vm', 'serial_log', 'status', 'wait_for_text']);
   const destructive = listed.filter((t) => t.annotations.destructiveHint).map((t) => t.name).sort();
   // stop_image: the app is killed after its timeout, and a rootfs="ram"
   // container's files are gone after a stop
@@ -709,4 +711,70 @@ test('exec, write_file, read_file, upload and download end to end over a local s
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// the screen as text: screen_text, wait_for_text, send_keys wait_for
+// ---------------------------------------------------------------------------
+// A fake manager whose screen shows `screens` one after another (the last one stays).
+function screenManager(screens) {
+  let n = 0;
+  return fakeManager({
+    gets: {
+      '/api/vm/screen-text?name=': () => {
+        const text = screens[Math.min(n, screens.length - 1)];
+        n++;
+        return { ok: true, name: 'kodi', text: text, lines: text.split('\n').map((t, i) => ({ text: t, x: 10, y: 20 * i, w: 100, h: 13 })), width: 1280, height: 800, scale: 2, ms: 120 };
+      },
+    },
+    posts: { '/api/vm/keys': (body) => ({ ok: true, name: body.name, sent: String(body.keys).split(/\s+/).length, delayMs: body.delayMs || 150 }) },
+  });
+}
+
+test('screen_text: the text and each line with its position, read through GET /api/vm/screen-text', async () => {
+  const m = screenManager(['QUICK INSTALL MENU\nPlease select a deuice:']);
+  const tl = toolsFor(m);
+  const r = await tl.call('screen_text', { name: 'kodi', scale: 1 });
+  assert.equal(r.text, 'QUICK INSTALL MENU\nPlease select a deuice:');
+  assert.deepEqual(r.lines[1], { text: 'Please select a deuice:', x: 10, y: 20, w: 100, h: 13 });
+  assert.equal(r.screen, '1280x800');
+  assert.deepEqual(m.calls.find((c) => c[0] === 'GET' && /screen-text/.test(c[1])), ['GET', '/api/vm/screen-text?name=kodi&scale=1']);
+});
+
+test('wait_for_text: polls until a phrase shows (OCR slips tolerated, any of several), or answers found=false at the timeout', async () => {
+  const m = screenManager(['LibreELEC (official): 12.2.1', 'Installing...', 'LibreELEC Install Complete\nYou may now remoue the install media and reboot .']);
+  const tl = toolsFor(m);
+  const r = await tl.call('wait_for_text', { name: 'kodi', text: 'No devices were found | remove the install media', timeout_s: 10, interval_ms: 100 });
+  assert.equal(r.found, true);
+  assert.equal(r.phrase, 'remove the install media');
+  assert.equal(r.matched, 'remoue the install media');
+  assert.equal(r.reads, 3);
+  assert.match(r.text, /Install Complete/);
+  // never there: found=false with the last screen, no error
+  const m2 = screenManager(['Display output is not active.']);
+  const t0 = Date.now();
+  const r2 = await toolsFor(m2).call('wait_for_text', { name: 'kodi', text: 'Kodi', timeout_s: 1, interval_ms: 100 });
+  assert.equal(r2.found, false);
+  assert.equal(r2.text, 'Display output is not active.');
+  assert.ok(r2.reads >= 2 && Date.now() - t0 < 3000, 'stops at the timeout');
+  assert.match(r2.hint, /did not|none of/);
+  await assert.rejects(toolsFor(m2).call('wait_for_text', { name: 'kodi', text: ' | ' }), /give a phrase/);
+});
+
+test('send_keys wait_for: the keys go first, then the screen is read until the next dialog shows', async () => {
+  const m = screenManager(['MAIN MENU\n1 Install LibreELEC', 'QUICK INSTALL MENU\nPlease select a deuice:']);
+  const tl = toolsFor(m);
+  const r = await tl.call('send_keys', { name: 'kodi', keys: 'ret', delay_ms: 400, wait_for: 'select a device | No devices were found', wait_timeout_s: 10 });
+  assert.equal(r.sent, 1);
+  assert.equal(r.found, true);
+  assert.equal(r.phrase, 'select a device');
+  const order = m.calls.filter((c) => /keys|screen-text/.test(c[1])).map((c) => c[0] + ' ' + c[1].split('?')[0]);
+  assert.equal(order[0], 'POST /api/vm/keys', 'keys before the first read');
+  assert.deepEqual(m.calls.find((c) => c[1] === '/api/vm/keys')[2], { name: 'kodi', keys: 'ret', delayMs: 400 });
+  // without wait_for: just the keys
+  const m3 = screenManager(['x']);
+  const r3 = await toolsFor(m3).call('send_keys', { name: 'kodi', keys: 'up up' });
+  assert.equal(r3.sent, 2);
+  assert.equal(r3.found, undefined);
+  assert.ok(!m3.calls.some((c) => /screen-text/.test(c[1])), 'no screen reads without wait_for');
 });

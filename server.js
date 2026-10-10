@@ -290,6 +290,8 @@ async function main(argv) {
     // the manager starts again.
     try { containers.shutdown(); } catch (e) {}
     try { shares.shutdown(); } catch (e) {}
+    // the OCR helper (a PowerShell process, lib/ocr.js) goes with the manager
+    try { require('./lib/ocr').shutdown(); } catch (e) {}
     removeManagerFile();
     try { server.close(); } catch (e) {}
     process.exit(0);

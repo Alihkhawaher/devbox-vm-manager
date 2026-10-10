@@ -25,7 +25,7 @@ with Docker inside. Folders of this PC can be **shared live** with both. An
 - **Live shared folders**: a folder of this PC appears inside a VM or a
   container, both ways, with nothing to install and no copying
   ([details](#shared-folders-live)).
-- **Claude integration**: 34 MCP tools. Claude can run images, create VMs,
+- **Claude integration**: 36 MCP tools. Claude can run images, create VMs,
   run commands in them, move files, share folders and clean up after itself
   ([details](#claude-integration-mcp)).
 - **Your ports stay on this PC**: every published port listens on 127.0.0.1
@@ -971,7 +971,7 @@ From top to bottom:
 | **Network** | every forward of every VM and container: port on this PC, owner, what it is, port inside, who can reach it (this PC / LAN), listening or not, owning process, conflicts, and "restart to apply" where QEMU still listens the old way |
 | **Terminal** | an interactive root (or `dev`) shell in the browser (xterm.js over `ssh -tt`) that follows the window size. Switching VM, closing the panel or closing the browser tab ends the ssh client; a session nobody watches is closed after 60 s; a brief disconnect reconnects and replays what was missed. The VM itself is never affected. |
 | **Serial console** | the VM's own root console: it works while the VM boots and when SSH or networking is broken. Plus the boot log (view or download). One serial connection at a time. |
-| **Screen** | appliance VMs only (see [Appliance VMs](#appliance-vms-any-os-with-a-screen)): the VM's display in the browser - keyboard, mouse, fit to window, Ctrl+Alt+Del, full screen, Save screenshot. An appliance has no Terminal or Docker tab. |
+| **Screen** | appliance VMs only (see [Appliance VMs](#appliance-vms-any-os-with-a-screen)): the VM's display in the browser - keyboard, mouse, fit to window, Ctrl+Alt+Del, full screen, Save screenshot, Screen as text (OCR, Windows). An appliance has no Terminal or Docker tab. |
 
 Deep links: `/?vm=<name>&tab=overview|settings|docker|network|terminal|serial|screen`
 (and the v1 form `/?console=<name>`, which opens the terminal).
@@ -1016,8 +1016,22 @@ firmware, rescue systems and installers just as well.
   Freezing an appliance into a template is refused: templates are the
   Alpine sandboxes.
 - **For Claude**: `create_appliance_vm`, `screenshot_vm` (a PNG under
-  `<data>/screenshots`, so it can look at the screen it is testing) and
-  `send_keys` (QEMU key names: `up down ret`, `ctrl-alt-delete`...).
+  `<data>/screenshots`, so it can look at the screen it is testing),
+  `send_keys` (QEMU key names: `up down ret`, `ctrl-alt-delete`...), and the
+  screen as text (below): `screen_text`, `wait_for_text`, and `send_keys`
+  with `wait_for`.
+- **Screen as text (Windows)**: the OCR engine built into Windows 10/11 reads
+  the screen - nothing is installed. One helper process
+  (`lib/assets/ocr-helper.ps1`, Windows PowerShell 5.1) keeps the engine
+  loaded: about a second to start, then 0.1-0.6 s per screen. Screens up to
+  2000 px wide are enlarged 2x first, which turns firmware and console fonts
+  from "LIEFI" into "UEFI". Waiting for a phrase ("Install Complete") instead
+  of for the picture to stop changing is what makes driving an installer
+  fast: the next key goes about a second after the dialog appears. Matching
+  ignores case and spacing and tolerates OCR's usual slips ("deuice", "@" for
+  0). The Screen tab has a **Screen as text** button too. It is an extra
+  method next to the screenshot; on Linux and macOS, or a Windows without an
+  OCR language, it answers 501 `OCR_UNAVAILABLE` and the screenshot still works.
 
 Tested with LibreELEC 12.2.1 Generic (`LibreELEC-Generic.x86_64-12.2.1.img.gz`,
 UEFI, virtio, installation media onto an 8 GB disk). Two things learned there:
@@ -1905,6 +1919,7 @@ JSON, 500 unexpected. Input is checked before anything starts: bad input is a
 | `GET /api/about` | version, data folder, node path, `mcpServer`, `mcpConfig` (the Connect Claude snippet) |
 | `GET /api/session/stream?id=&token=&since=` | Server-Sent Events: `{t, n}` output chunks (`n` = byte offset; reconnect with `since=n`), `{exit}` at the end |
 | `GET /api/vm/screenshot?name=` | the screen of a running appliance VM as `image/png` (QEMU's `screendump`) |
+| `GET /api/vm/screen-text?name=&scale=` | the same screen read by OCR (the engine built into Windows 10/11): `{text, lines: [{text, x, y, w, h}], width, height, scale, ms, language, engine}`; `scale` 1-3 enlarges it first (default 2 up to 2000 px wide). 501 `OCR_UNAVAILABLE` on Linux and macOS, or when Windows has no OCR language |
 | `GET /api/vm/screen?name=&token=` | **WebSocket** (`Upgrade: websocket`): the live screen of a running appliance VM, relayed byte for byte to QEMU's private VNC server for noVNC in the GUI; the token comes in the query string like the streams |
 | `GET /api/containers?all=` | microVM containers (Docker images run without Docker): `{containers}`, env values redacted; `all=0` only the live ones |
 | `GET /api/container?id=&reveal=` | `{container}`: the record (id, name or a unique id prefix of 3+ characters) with `live {phase, ready, stopAcknowledged}`, `timings`, `logSizes`, `initMessages`, `consoleTail`, `warnings`, `fallback`, `rootfs`, `rootDisk {configDigest, disk, createdAt, virtualBytes, overlayBytes}` (null for a RAM root or before the first start), `runtime.rootfs`; `reveal=1` shows env values; share keys never appear |

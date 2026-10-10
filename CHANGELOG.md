@@ -29,6 +29,15 @@
   `lib/png.js`, saved under `<data>/screenshots`) and `send_keys` (QEMU
   `sendkey` names), so it can look at the screen it is testing and drive it.
   `GET /api/vm/screenshot?name=` and `POST /api/vm/keys` for everyone else.
+- **Screen as text** (Windows): `GET /api/vm/screen-text`, the MCP tools
+  `screen_text` and `wait_for_text`, `send_keys wait_for`, and a **Screen as
+  text** button on the Screen tab. Windows' own OCR engine (Windows.Media.Ocr)
+  in one persistent PowerShell 5.1 helper (`lib/ocr.js`,
+  `lib/assets/ocr-helper.ps1`): 0.1-0.6 s per screen, screens up to 2000 px
+  enlarged 2x first, phrase matching by edit distance that tolerates OCR's
+  slips. Driving LibreELEC's installer by waiting for its dialogs' words
+  instead of for a still picture removes 30-100 s of waiting per step. 501
+  `OCR_UNAVAILABLE` elsewhere; the screenshot is unaffected.
 - Appliance VMs have no SSH: the status is "running" as soon as the screen
   answers, Stop sends an ACPI power-off, the Terminal and Docker tabs are
   hidden for them, and their SSH port number is never forwarded (it only
