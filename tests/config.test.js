@@ -133,6 +133,22 @@ test('rootId: 12 hex chars, stable, different per folder', () => {
   assert.notEqual(a, c);
 });
 
+test('rootId: one id for a folder and a junction to it, also before the data folder exists', (t) => {
+  // A data folder reached through a junction (D:\Work -> C:\work): the MCP server
+  // (registered with one name) and a manager started from the app (real path) must agree.
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devbox-rootid-'));
+  try {
+    const real = path.join(base, 'Real');
+    fs.mkdirSync(path.join(real, 'Tools', 'devbox', 'data'), { recursive: true });
+    const link = path.join(base, 'Linked');
+    try { fs.symlinkSync(real, link, 'junction'); } catch (e) { t.skip('cannot make a junction or symlink here: ' + e.code); return; }
+    assert.equal(config.rootId(path.join(link, 'Tools', 'devbox', 'data')), config.rootId(path.join(real, 'Tools', 'devbox', 'data')));
+    assert.equal(config.rootId(path.join(link, 'Tools', 'devbox', 'not-yet', 'data')),
+                 config.rootId(path.join(real, 'Tools', 'devbox', 'not-yet', 'data')), 'a folder that does not exist yet');
+    assert.notEqual(config.rootId(path.join(link, 'Tools', 'devbox', 'data')), config.rootId(path.join(real, 'Tools', 'other')));
+  } finally { rm(base); }
+});
+
 test('ensureToken: created once (48 hex chars), then reused; readToken rejects junk', () => {
   const root = useTempRoot('token');
   try {

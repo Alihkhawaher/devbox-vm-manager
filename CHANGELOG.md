@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.3.2
+
+- **One data folder, whatever name it is reached by.** The MCP server and the
+  manager recognise "the manager for this data folder" by a hash of its path
+  (`rootId`), and that hash used the path exactly as written. On a PC where the
+  folder is reached through a junction (`D:\Work` -> `C:\work`), the MCP
+  server - registered with one name - and a manager started from the app - which
+  Node runs from the real path - got different ids, so the MCP server started a
+  second manager on the same data. `rootId` now hashes the real folder (junctions and symlinks resolved,
+  true case; a part that does not exist yet is kept under its nearest existing
+  parent's real path), and the client's start-once guard and port hint compare
+  by `rootId` too. Nothing changes where no junction is involved.
+
 ## 2.3.1
 
 - **Type text into a VM**: `POST /api/vm/keys` and the MCP tool `send_keys`
